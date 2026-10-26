@@ -1,0 +1,13 @@
+add_executable(test_sprat_raylib test_sprat_raylib.c)
+target_link_libraries(test_sprat_raylib PRIVATE raylib sprat::sprat)
+target_include_directories(test_sprat_raylib PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_definitions(test_sprat_raylib PRIVATE
+    SPRAT_RAYLIB_EXAMPLE_SHEET="${PROJECT_SOURCE_DIR}/examples/resources/sheet.sprat")
+if(MSVC)
+    target_compile_options(test_sprat_raylib PRIVATE /W4)
+    target_compile_definitions(test_sprat_raylib PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(test_sprat_raylib PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+    target_link_libraries(test_sprat_raylib PRIVATE m)
+endif()
+add_test(NAME test_sprat_raylib COMMAND test_sprat_raylib)
