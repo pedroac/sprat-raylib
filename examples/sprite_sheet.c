@@ -57,6 +57,7 @@ int main(void)
         SetSpratAnimationSpeed(&spins[i], spinSpeeds[i]);
     }
     SpratAnimationPlayer coinSpin = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "spin"));
+    SpratAnimationPlayer coinPingPong = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "spin-pingpong"));
     int idle = GetSpratFrameIndex(sheet, "hero/run_01.png");
     int panel = GetSpratFrameIndex(sheet, "panel");
 
@@ -104,6 +105,7 @@ int main(void)
         UpdateSpratAnimation(&runLeft, dt);
         for (int i = 0; i < 3; i++) UpdateSpratAnimation(&spins[i], dt);
         UpdateSpratAnimation(&coinSpin, dt);
+        UpdateSpratAnimation(&coinPingPong, dt);
 
         if (IsKeyPressed(KEY_P))
         {
@@ -161,10 +163,12 @@ int main(void)
             DrawText("DrawSpratFrameNPatch()", (int)panelRec.x + 20, (int)panelRec.y + 24, 20, RAYWHITE);
             DrawText("LEFT/RIGHT run, SPACE swing\nD pivots and hitboxes, P pause", (int)panelRec.x + 20, (int)panelRec.y + 56, 10, LIGHTGRAY);
 
-            // Looping animations, with the flip the sheet gave each one
+            // Animations, with the flip and loop mode the sheet gave each one
             DrawText("run", 470, 40, 10, GRAY);
             DrawText("run-left (alias, flip h)", 580, 40, 10, GRAY);
             DrawText("spin", 735, 40, 10, GRAY);
+            DrawText("pingpong", 405, 40, 10, GRAY);
+            DrawSpratAnimation(sheet, coinPingPong, (Vector2){ 425, 90 }, WHITE);
             DrawSpratAnimation(sheet, run, (Vector2){ 490, 150 }, WHITE);
             DrawSpratAnimation(sheet, runLeft, (Vector2){ 630, 150 }, WHITE);
             for (int i = 0; i < 3; i++)

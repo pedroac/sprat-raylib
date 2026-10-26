@@ -1,6 +1,6 @@
 /**********************************************************************************************
 *
-*   sprat-raylib v0.3.0 - Load and draw sprat-cli sprite sheets with raylib
+*   sprat-raylib v0.4.0 - Load and draw sprat-cli sprite sheets with raylib
 *
 *   DESCRIPTION:
 *       Loads the metadata written by `spratconvert --transform raw` (through sprat-lib)
@@ -39,7 +39,7 @@
 *
 *   DEPENDENCIES:
 *       raylib 5.5 or newer     - Textures, drawing, file loading and logging
-*       sprat-lib 0.5 or newer  - Parsing and validating the .sprat file (implementation only)
+*       sprat-lib 0.7 or newer  - Parsing and validating the .sprat file (implementation only)
 *
 *   COORDINATES:
 *       Frame geometry (pivot, content, size, slice, markers) is in original-image pixels,
@@ -57,7 +57,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.3.0"
+#define SPRAT_RAYLIB_VERSION    "0.4.0"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)
@@ -78,6 +78,12 @@ typedef enum {
     SPRAT_FLIP_HORIZONTAL = 1,  // Mirror around the pivot's vertical axis
     SPRAT_FLIP_VERTICAL = 2     // Mirror around the pivot's horizontal axis
 } SpratFlip;
+
+// Loop mode flags, combined with | (none repeats the animation forward)
+typedef enum {
+    SPRAT_LOOP_MODE_ONCE = 1,       // Play one pass and stop: on the last frame, or with ping-pong on the first
+    SPRAT_LOOP_MODE_PINGPONG = 2    // Play forward then backward, without repeating the end frames
+} SpratLoopMode;
 
 // Marker shape
 typedef enum {
@@ -139,15 +145,15 @@ typedef struct SpratAnimation {
     int *frames;            // Frame indexes, in play order
     int frameCount;         // Frame index count (may be 0)
     int flip;               // Flip flags the animation is played with (SpratFlip)
+    int loop;               // Loop mode flags the animation is played with (SpratLoopMode)
 } SpratAnimation;
 
 // Playback of an animation: keep one per animated thing and update it every frame
 typedef struct SpratAnimationPlayer {
-    SpratAnimation animation;   // Animation played (shares the sheet's frame array)
-    float time;                 // Seconds into the animation, from 0 to its duration (frameCount/fps)
+    SpratAnimation animation;   // Animation played (shares the sheet's frame array), with its flip and loop flags
+    float time;                 // Seconds into one pass of the animation, from 0 to its duration
     float speed;                // Playback rate: 1.0f plays at the animation's fps, negative plays in reverse
     bool playing;               // Advanced by UpdateSpratAnimation()
-    bool loop;                  // Wrap around at the end, otherwise stop on the last frame
 } SpratAnimationPlayer;
 
 // Sprite sheet: atlas textures, frames and animations
@@ -212,7 +218,7 @@ SPRATAPI bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, 
 // Animation functions
 SPRATAPI SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name); // Get animation by name, zeroed if not found
 SPRATAPI bool IsSpratAnimationValid(SpratAnimation animation);                 // Check if an animation is valid (found in a sheet; it may have no frames)
-SPRATAPI SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation); // Make a player for an animation: playing, looping, at speed 1.0f
+SPRATAPI SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation); // Make a player for an animation: playing from its start, at speed 1.0f
 SPRATAPI void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime); // Advance a playing animation by deltaTime seconds, scaled by its speed
 SPRATAPI void PlaySpratAnimation(SpratAnimationPlayer *player);                // Play an animation from its start (its end when the speed is negative)
 SPRATAPI void StopSpratAnimation(SpratAnimationPlayer *player);                // Stop an animation and rewind it to where PlaySpratAnimation() starts
@@ -220,7 +226,7 @@ SPRATAPI void PauseSpratAnimation(SpratAnimationPlayer *player);               /
 SPRATAPI void ResumeSpratAnimation(SpratAnimationPlayer *player);              // Resume a paused animation
 SPRATAPI void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed); // Set playback rate (1.0f is the animation's fps, negative plays in reverse)
 SPRATAPI bool IsSpratAnimationPlaying(SpratAnimationPlayer player);            // Check if an animation is playing
-SPRATAPI bool IsSpratAnimationFinished(SpratAnimationPlayer player);           // Check if a non-looping animation reached its end in the direction it plays
+SPRATAPI bool IsSpratAnimationFinished(SpratAnimationPlayer player);           // Check if a SPRAT_LOOP_MODE_ONCE animation reached its end in the direction it plays
 SPRATAPI int GetSpratAnimationFrame(SpratAnimationPlayer player);              // Get frame index shown now (an index into sheet.frames), -1 if none
 SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint); // Draw the frame shown now, with the animation's flip (use a SpratSprite to scale or rotate it)
 
@@ -308,6 +314,7 @@ static SpratSheet SpratLoadSheetData(const unsigned char *fileData, int dataSize
 static SpratSheet SpratConvertSheet(const sprat_sheet *raw);
 static bool SpratJoinPath(char *buffer, int bufferSize, const char *dir, const char *path);
 static bool SpratIsFrameDrawable(SpratSheet sheet, int frame);
+static double SpratGetAnimationStepCount(SpratAnimation animation);
 static float SpratGetAnimationDuration(SpratAnimation animation);
 static SpratPlacement SpratGetPlacement(Vector2 pivot, Vector2 position, Vector2 scale, float rotation, int flip);
 static SpratPoint SpratPlacePoint(const SpratPlacement *placement, double x, double y);
@@ -752,7 +759,7 @@ bool IsSpratAnimationValid(SpratAnimation animation)
            ((animation.frameCount == 0) || (animation.frames != NULL));
 }
 
-// Make a player for an animation: playing, looping, at speed 1.0f
+// Make a player for an animation: playing from its start, at speed 1.0f
 // NOTE: A player allocates nothing: copy it, reset it or drop it freely
 SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation)
 {
@@ -761,14 +768,13 @@ SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation)
     player.animation = animation;
     player.speed = 1.0f;
     player.playing = true;
-    player.loop = true;
 
     return player;
 }
 
 // Advance a playing animation by deltaTime seconds, scaled by its speed
-// NOTE: A looping animation's time wraps around, so it stays precise however long it plays.
-// A non-looping one stops at its end, or at its start when playing in reverse
+// NOTE: A repeating animation's time wraps around, so it stays precise however long it plays.
+// A SPRAT_LOOP_MODE_ONCE one stops at its end, or at its start when playing in reverse
 void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime)
 {
     if ((player == NULL) || !player->playing) return;
@@ -779,7 +785,7 @@ void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime)
     double time = (double)player->time + (double)deltaTime*player->speed;
     if (!isfinite(time)) return;     // NaN or infinite time, step or speed: keep the last good time
 
-    if (player->loop)
+    if (!(player->animation.loop & SPRAT_LOOP_MODE_ONCE))
     {
         time = fmod(time, duration);
         if (time < 0.0) time += duration;
@@ -837,38 +843,42 @@ bool IsSpratAnimationPlaying(SpratAnimationPlayer player)
     return player.playing;
 }
 
-// Check if a non-looping animation reached its end in the direction it plays
-// NOTE: Looping animations never finish
+// Check if a SPRAT_LOOP_MODE_ONCE animation reached its end in the direction it plays
+// NOTE: Repeating animations never finish
 bool IsSpratAnimationFinished(SpratAnimationPlayer player)
 {
     float duration = SpratGetAnimationDuration(player.animation);
 
-    if (player.loop || (duration <= 0.0f)) return false;
+    if (!(player.animation.loop & SPRAT_LOOP_MODE_ONCE) || (duration <= 0.0f)) return false;
 
     return (player.speed < 0.0f)? (player.time <= 0.0f) : (player.time >= duration);
 }
 
 // Get frame index shown now (an index into sheet.frames), -1 if none
-// NOTE: Frame k covers the times [k/fps, (k + 1)/fps), or (k/fps, (k + 1)/fps] in reverse,
-// so playing from either end shows the frame at that end first
+// NOTE: Step k of a pass covers the times [k/fps, (k + 1)/fps), or (k/fps, (k + 1)/fps] in
+// reverse, so playing from either end shows the frame at that end first. With ping-pong,
+// steps past the last frame walk the frames back
 int GetSpratAnimationFrame(SpratAnimationPlayer player)
 {
     const SpratAnimation *anim = &player.animation;
+    double stepCount = SpratGetAnimationStepCount(*anim);
 
-    if ((anim->frameCount <= 0) || (anim->frames == NULL) || (anim->fps <= 0)) return -1;
+    if ((stepCount <= 0.0) || (anim->frames == NULL)) return -1;
 
     double position = (double)player.time*anim->fps;
     double step = (player.speed < 0.0f)? ceil(position) - 1.0 : floor(position);
     if (!isfinite(step)) return -1;     // NaN or infinite time: (int)step would be undefined
 
-    if (player.loop)
+    if (!(anim->loop & SPRAT_LOOP_MODE_ONCE))
     {
         // fmod() keeps the step exact and in range for any time, negative included
-        step = fmod(step, (double)anim->frameCount);
-        if (step < 0.0) step += anim->frameCount;
+        step = fmod(step, stepCount);
+        if (step < 0.0) step += stepCount;
     }
     else if (step < 0.0) step = 0.0;
-    else if (step > anim->frameCount - 1) step = anim->frameCount - 1;
+    else if (step > stepCount - 1.0) step = stepCount - 1.0;
+
+    if (step >= anim->frameCount) step = 2.0*(anim->frameCount - 1) - step;    // On the way back
 
     return anim->frames[(int)step];
 }
@@ -1092,6 +1102,7 @@ static SpratSheet SpratConvertSheet(const sprat_sheet *raw)
         anim->fps = src->fps;
         anim->frameCount = (int)src->frame_count;
         anim->flip = (int)src->flip;     // SPRAT_FLIP_H/V have the values of SPRAT_FLIP_HORIZONTAL/VERTICAL
+        anim->loop = (int)src->loop;     // SPRAT_LOOP_ONCE/PINGPONG have the values of SPRAT_LOOP_MODE_ONCE/PINGPONG
 
         if (src->frame_count == 0) continue;
 
@@ -1161,12 +1172,27 @@ static bool SpratIsFrameDrawable(SpratSheet sheet, int frame)
     return (atlas >= 0) && (atlas < sheet.atlasCount) && (sheet.atlases[atlas].id > 0);
 }
 
-// Get animation duration in seconds, 0 for an animation without frames
+// Get the number of frames shown in one pass of an animation, 0 for one without frames
+// NOTE: Ping-pong walks the frames back without repeating the last: 0 1 2 1 repeats, and
+// played once, 0 1 2 1 0 stops on the first frame. In double, so no frame count overflows it
+static double SpratGetAnimationStepCount(SpratAnimation animation)
+{
+    double count = animation.frameCount;
+
+    if ((count <= 0.0) || (animation.fps <= 0)) return 0.0;
+    if ((animation.loop & SPRAT_LOOP_MODE_PINGPONG) && (count > 1.0)) count = 2.0*count - ((animation.loop & SPRAT_LOOP_MODE_ONCE)? 1.0 : 2.0);
+
+    return count;
+}
+
+// Get the duration of one pass of an animation in seconds, 0 for one without frames
 static float SpratGetAnimationDuration(SpratAnimation animation)
 {
-    if ((animation.frameCount <= 0) || (animation.fps <= 0)) return 0.0f;
+    double stepCount = SpratGetAnimationStepCount(animation);
 
-    return (float)((double)animation.frameCount/animation.fps);
+    if (stepCount <= 0.0) return 0.0f;
+
+    return (float)(stepCount/animation.fps);
 }
 
 // Get the cosine and sine of a clockwise angle in degrees

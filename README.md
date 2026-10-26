@@ -52,7 +52,7 @@ int main(void)
 
 `src/sprat-raylib.h` is the whole library. Define `SPRAT_RAYLIB_IMPLEMENTATION` in
 exactly one C file before including it, and link raylib (5.5 or newer) and
-sprat-lib (0.5 or newer):
+sprat-lib (0.7 or newer):
 
 ```sh
 cc game.c -Isrc -I../sprat-lib/include ../sprat-lib/src/*.c -lraylib -lm
@@ -155,10 +155,12 @@ typedef struct SpratSheet {
   the trimmed `content` region inside it, the `pivot`, the nine-slice insets
   (`slice`) and the frame's `markers`. Frame geometry is in original-image
   pixels, scaled to atlas pixels, with Y pointing down.
-- **Animations** list frame indexes in play order, with an `fps` and the `flip`
-  they are played with. Aliases are already resolved: `run-left`, an alias of
-  `run` with `flip h`, has `run`'s frames (the same array, not a copy) and `flip` set to
-  `SPRAT_FLIP_HORIZONTAL`. An animation may have no frames.
+- **Animations** list frame indexes in play order, with an `fps`, and the `flip`
+  and `loop` mode they are played with. Aliases are already resolved:
+  `run-left`, an alias of `run` with `flip h`, has `run`'s frames (the same
+  array, not a copy) and loop mode, and `flip` set to `SPRAT_FLIP_HORIZONTAL`.
+  Sheets written before loop modes (`sprat-raw 1`) load with `loop` 0. An
+  animation may have no frames.
 - **Names**: a frame's `name` is its file's basename and can repeat across
   folders; its `path` is unique. `GetSpratFrameIndex()` takes either: it
   matches the path first, then a name that only one frame has, and logs a
@@ -218,15 +220,14 @@ of per animated thing, the way raylib's `Music` is played and updated:
 
 ```c
 typedef struct SpratAnimationPlayer {
-    SpratAnimation animation;   // Animation played (shares the sheet's frame array)
-    float time;                 // Seconds into the animation, from 0 to its duration (frameCount/fps)
+    SpratAnimation animation;   // Animation played (shares the sheet's frame array), with its flip and loop flags
+    float time;                 // Seconds into one pass of the animation, from 0 to its duration
     float speed;                // Playback rate: 1.0f plays at the animation's fps, negative plays in reverse
     bool playing;               // Advanced by UpdateSpratAnimation()
-    bool loop;                  // Wrap around at the end, otherwise stop on the last frame
 } SpratAnimationPlayer;
 ```
 
-`MakeSpratAnimationPlayer()` returns one already playing, looping, at speed
+`MakeSpratAnimationPlayer()` returns one already playing from its start, at speed
 `1.0f`; it allocates nothing, so copy it or drop it freely. Call
 `UpdateSpratAnimation(&player, GetFrameTime())` once per frame: time only moves
 while you update it, so pausing the game, slow motion or a fixed time step
@@ -235,9 +236,28 @@ keep the time, `PlaySpratAnimation()` restarts and `StopSpratAnimation()`
 rewinds without playing.
 
 A negative speed plays in reverse, and `PlaySpratAnimation()` then starts from
-the last frame. Set `loop` to `false` to play once: the player stops on the
-last frame it reaches (the first when reversed) and `IsSpratAnimationFinished()`
-becomes true. The fields are yours to read and set, `time` included.
+the last frame. The fields are yours to read and set, `time` included.
+
+The player plays the loop mode the sheet gave the animation (sprat-cli's
+`loop`, `once`, `pingpong` or `once-pingpong`), as `SpratLoopMode` flags in
+`animation.loop`:
+
+| `animation.loop` | Frames 0 1 2 play as |
+| --- | --- |
+| `0` | 0 1 2, 0 1 2, ... |
+| `SPRAT_LOOP_MODE_ONCE` | 0 1 2, stopping on 2 |
+| `SPRAT_LOOP_MODE_PINGPONG` | 0 1 2 1, 0 1 2 1, ... |
+| `SPRAT_LOOP_MODE_ONCE \| SPRAT_LOOP_MODE_PINGPONG` | 0 1 2 1 0, stopping on 0 |
+
+`time` covers one pass, so a ping-pong pass lasts `(2*frameCount - 2)/fps`
+(`(2*frameCount - 1)/fps` once). A `SPRAT_LOOP_MODE_ONCE` animation stops at the
+end of its pass (at its start when reversed) and `IsSpratAnimationFinished()`
+becomes true. To play an animation another way, change the player's copy:
+
+```c
+SpratAnimationPlayer attack = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "attack"));
+attack.animation.loop = SPRAT_LOOP_MODE_ONCE;
+```
 
 `GetSpratAnimationFrame()` gives the frame shown now, an index into
 `sheet.frames`, for its markers or a hitbox. `DrawSpratAnimation()` draws it with
@@ -336,10 +356,10 @@ valid until `UnloadSpratSheet()`. `sheet.frames` is its start, so it is not
 
 [`examples/sprite_sheet.c`](examples/sprite_sheet.c) draws every frame of the
 example sheet (most of them stored turned in the atlas), plays the `run`,
-`run-left` and `spin` animations, resizes a nine-patch panel, and lets you run
-a hero holding a sword at its `hand` marker, picking up spinning coins its
-hitbox or the sword's `blade` touches. `D` shows pivots, hitboxes and the
-blade.
+`run-left`, `spin` and `spin-pingpong` animations, resizes a nine-patch panel,
+and lets you run a hero holding a sword at its `hand` marker, picking up
+spinning coins its hitbox or the sword's `blade` touches. `D` shows pivots,
+hitboxes and the blade.
 
 The sheet in `examples/resources/` was packed with sprat-cli by
 `make_resources.sh`, from frames drawn by `make_sources.py`.
@@ -351,8 +371,6 @@ The sheet in `examples/resources/` was packed with sprat-cli by
 - Atlas paths are used as written, so a sheet from an untrusted source could
   name any file. Parse such a sheet with sprat-lib first and check each
   `atlases[i].path` with `sprat_path_is_safe()` before loading it here.
-- The sheet format has no loop setting yet: every player loops until you set
-  `loop` to `false`.
 
 ## License
 
