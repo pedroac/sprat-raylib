@@ -123,8 +123,10 @@ static void test_convert_example(void)
     CHECK_INT(panel.markerCount, 0);
     CHECK(panel.markers == NULL);
 
-    SpratAnimation run = sheet.animations[GetSpratAnimationIndex(sheet, "run")];
-    SpratAnimation left = sheet.animations[GetSpratAnimationIndex(sheet, "run-left")];
+    SpratAnimation run = GetSpratAnimation(sheet, "run");
+    SpratAnimation left = GetSpratAnimation(sheet, "run-left");
+    CHECK(IsSpratAnimationValid(run));
+    CHECK(run.frames == sheet.animations[0].frames);
     CHECK_INT(run.fps, 10);
     CHECK_INT(run.frameCount, 6);
     CHECK_INT(run.frames[0], run01);
@@ -154,7 +156,12 @@ static void test_convert_polygon_and_empty(void)
     CHECK_STR(sheet.animations[0].name, "empty");
     CHECK_INT(sheet.animations[0].frameCount, 0);
     CHECK(sheet.animations[0].frames == NULL);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 1.0f), -1);
+    CHECK(IsSpratAnimationValid(sheet.animations[0]));      // found, though empty
+    SpratAnimationPlayer empty = MakeSpratAnimationPlayer(sheet.animations[0]);
+    UpdateSpratAnimation(&empty, 1.0f);
+    CHECK_FLOAT(empty.time, 0);
+    CHECK_INT(GetSpratAnimationFrame(empty), -1);
+    CHECK(!IsSpratAnimationFinished(empty));
     UnloadSpratSheet(sheet);
 
     // No sprites at all: frames still holds the sheet's memory
@@ -270,8 +277,9 @@ static void test_lookups(void)
     CHECK_INT(GetSpratFrameIndex(sheet, "missing"), -1);
     CHECK_INT(GetSpratFrameIndex(sheet, NULL), -1);
 
-    CHECK_INT(GetSpratAnimationIndex(sheet, "back"), 1);
-    CHECK_INT(GetSpratAnimationIndex(sheet, "run"), -1);
+    CHECK_STR(GetSpratAnimation(sheet, "back").name, "back");
+    CHECK(!IsSpratAnimationValid(GetSpratAnimation(sheet, "run")));
+    CHECK(!IsSpratAnimationValid(GetSpratAnimation(sheet, NULL)));
     CHECK_INT(sheet.animations[1].flip, SPRAT_FLIP_HORIZONTAL | SPRAT_FLIP_VERTICAL);
 
     const SpratMarker *hit = GetSpratFrameMarker(sheet, 0, "hit");
@@ -286,19 +294,18 @@ static void test_lookups(void)
     CHECK(GetSpratFrameMarker(sheet, -1, "hit") == NULL);
 
     // walk plays frames 2, 0, 1 at 4 fps, looping
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 0.0f), 2);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 0.24f), 2);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 0.25f), 0);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 0.5f), 1);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 0.75f), 2);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, -0.1f), 1);  // loops backwards too
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, 3600.0f*24.0f*365.0f), 2);   // 4*31536000 steps, a multiple of 3
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, NAN), -1);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, INFINITY), -1);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 0, -INFINITY), -1);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 1, 0.25f), 0);
-    CHECK_INT(GetSpratAnimationFrame(sheet, 2, 0.0f), -1);
-    CHECK_INT(GetSpratAnimationFrame(sheet, -1, 0.0f), -1);
+    SpratAnimationPlayer walk = MakeSpratAnimationPlayer(sheet.animations[0]);
+    float times[] = { 0.0f, 0.24f, 0.25f, 0.5f, 0.75f, -0.1f, 3600.0f*24.0f*365.0f, NAN, INFINITY, -INFINITY };
+    int expected[] = { 2, 2, 0, 1, 2, 1, 2, -1, -1, -1 };     // a year is 4*31536000 steps, a multiple of 3
+    for (size_t i = 0; i < COUNT(times); i++)
+    {
+        walk.time = times[i];
+        CHECK_INT(GetSpratAnimationFrame(walk), expected[i]);
+    }
+    SpratAnimationPlayer back = MakeSpratAnimationPlayer(sheet.animations[1]);
+    back.time = 0.25f;
+    CHECK_INT(GetSpratAnimationFrame(back), 0);
+    CHECK_INT(GetSpratAnimationFrame(MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "missing"))), -1);
 
     UnloadSpratSheet(sheet);
 
@@ -416,6 +423,136 @@ static int expected_pixel(const image_case *img, double wx, double wy, Vector2 s
     y += img->pivotY;
     if (x < img->left || x >= img->w - img->right || y < img->top || y >= img->h - img->bottom) return 0;
     return original_pixel((int)floor(x), (int)floor(y));
+}
+
+/* Frames 7, 8, 9 at 4 fps: each lasts 0.25 s, exact in binary, and the
+ * animation lasts 0.75 s. */
+static SpratAnimationPlayer make_test_player(void)
+{
+    static int frames[] = { 7, 8, 9 };
+    SpratAnimation animation = { "walk", 4, frames, 3, 0 };
+
+    return MakeSpratAnimationPlayer(animation);
+}
+
+static void test_animation_player(void)
+{
+    SpratAnimationPlayer player = make_test_player();
+    CHECK(IsSpratAnimationPlaying(player));
+    CHECK(player.loop);
+    CHECK_FLOAT(player.speed, 1);
+    CHECK_FLOAT(player.time, 0);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    // Looping forward: each frame from its start, and back to the first
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_INT(GetSpratAnimationFrame(player), 8);
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_FLOAT(player.time, 0);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+    UpdateSpratAnimation(&player, 7.5f + 0.25f);    // many loops at once: time stays wrapped
+    CHECK_FLOAT(player.time, 0.25f);
+    CHECK(!IsSpratAnimationFinished(player));
+
+    // Speed scales the step
+    SetSpratAnimationSpeed(&player, 2.0f);
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    SetSpratAnimationSpeed(&player, NAN);           // ignored
+    CHECK_FLOAT(player.speed, 2);
+
+    // Paused, it keeps its time and frame
+    PauseSpratAnimation(&player);
+    CHECK(!IsSpratAnimationPlaying(player));
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_FLOAT(player.time, 0.5f);
+    ResumeSpratAnimation(&player);
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_FLOAT(player.time, 0.0f);
+
+    // Bad steps keep the last good time
+    UpdateSpratAnimation(&player, NAN);
+    UpdateSpratAnimation(&player, INFINITY);
+    CHECK_FLOAT(player.time, 0.0f);
+    UpdateSpratAnimation(NULL, 1.0f);
+
+    // Reverse: starts on the last frame, each frame from its end, wrapping around
+    player = make_test_player();
+    SetSpratAnimationSpeed(&player, -1.0f);
+    PlaySpratAnimation(&player);
+    CHECK_FLOAT(player.time, 0.75f);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_INT(GetSpratAnimationFrame(player), 8);
+    UpdateSpratAnimation(&player, 0.25f);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_FLOAT(player.time, 0);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);  // time 0 ends frame 7, so it is the wrap to 9
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_FLOAT(player.time, 0.625f);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+
+    // Once: stops on the last frame and reports it finished
+    player = make_test_player();
+    player.loop = false;
+    UpdateSpratAnimation(&player, 0.5f);
+    CHECK(IsSpratAnimationPlaying(player));
+    CHECK(!IsSpratAnimationFinished(player));
+    UpdateSpratAnimation(&player, 1.0f);
+    CHECK(!IsSpratAnimationPlaying(player));
+    CHECK(IsSpratAnimationFinished(player));
+    CHECK_FLOAT(player.time, 0.75f);
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    PlaySpratAnimation(&player);
+    UpdateSpratAnimation(&player, 0.0f);            // a zero step doesn't stop a fresh one
+    CHECK(IsSpratAnimationPlaying(player));
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    // Once in reverse: stops on the first frame
+    SetSpratAnimationSpeed(&player, -1.0f);
+    PlaySpratAnimation(&player);
+    UpdateSpratAnimation(&player, 2.0f);
+    CHECK(!IsSpratAnimationPlaying(player));
+    CHECK(IsSpratAnimationFinished(player));
+    CHECK_FLOAT(player.time, 0);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    // Stop rewinds to where Play starts, without playing
+    UpdateSpratAnimation(&player, 0.0f);
+    StopSpratAnimation(&player);
+    CHECK(!IsSpratAnimationPlaying(player));
+    CHECK_FLOAT(player.time, 0.75f);
+    SetSpratAnimationSpeed(&player, 1.0f);
+    StopSpratAnimation(&player);
+    CHECK_FLOAT(player.time, 0);
+
+    // Times set by hand: any value maps to a frame, or to none
+    player = make_test_player();
+    player.time = -0.1f;
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    player.time = 100.0f;                           // step 400, past 133 loops
+    CHECK_INT(GetSpratAnimationFrame(player), 8);
+    player.time = NAN;
+    CHECK_INT(GetSpratAnimationFrame(player), -1);
+    player.loop = false;
+    player.time = 100.0f;
+    CHECK_INT(GetSpratAnimationFrame(player), 9);
+    player.time = -100.0f;
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    // A zeroed animation (not found) plays nothing
+    SpratAnimation none = { 0 };
+    player = MakeSpratAnimationPlayer(none);
+    CHECK(!IsSpratAnimationValid(none));
+    UpdateSpratAnimation(&player, 1.0f);
+    PlaySpratAnimation(&player);
+    CHECK_INT(GetSpratAnimationFrame(player), -1);
+    CHECK(!IsSpratAnimationFinished(player));
 }
 
 static void test_draw_matches_original(void)
@@ -594,6 +731,7 @@ int main(void)
     test_add_size_overflow();
     test_join_path();
     test_lookups();
+    test_animation_player();
     test_draw_matches_original();
     test_frame_point_matches_draw();
     test_npatch_matches_original();

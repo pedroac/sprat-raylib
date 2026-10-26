@@ -30,13 +30,15 @@ int main(void)
     InitWindow(800, 450, "sprat-raylib");
 
     SpratSheet sheet = LoadSpratSheet("resources/hero.sprat");
-    int run = GetSpratAnimationIndex(sheet, "run");
+    SpratAnimationPlayer run = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "run"));
 
     while (!WindowShouldClose())
     {
+        UpdateSpratAnimation(&run, GetFrameTime());
+
         BeginDrawing();
             ClearBackground(RAYWHITE);
-            DrawSpratAnimation(sheet, run, (float)GetTime(), (Vector2){ 400, 300 }, WHITE);
+            DrawSpratAnimation(sheet, run, (Vector2){ 400, 300 }, WHITE);
         EndDrawing();
     }
 
@@ -95,9 +97,7 @@ void UnloadSpratSheet(SpratSheet sheet);
 
 // Sheet query functions
 int GetSpratFrameIndex(SpratSheet sheet, const char *pathOrName);
-int GetSpratAnimationIndex(SpratSheet sheet, const char *name);
 const SpratMarker *GetSpratFrameMarker(SpratSheet sheet, int frame, const char *name);
-int GetSpratAnimationFrame(SpratSheet sheet, int animation, float time);
 Vector2 GetSpratFramePoint(SpratSheet sheet, int frame, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip);
 
 // Sheet drawing functions
@@ -105,7 +105,21 @@ void DrawSpratFrame(SpratSheet sheet, int frame, Vector2 position, Color tint);
 void DrawSpratFrameEx(SpratSheet sheet, int frame, Vector2 position, float rotation, float scale, Color tint);
 void DrawSpratFramePro(SpratSheet sheet, int frame, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
 void DrawSpratFrameNPatch(SpratSheet sheet, int frame, Rectangle dest, Color tint);
-void DrawSpratAnimation(SpratSheet sheet, int animation, float time, Vector2 position, Color tint);
+
+// Animation functions
+SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name);
+bool IsSpratAnimationValid(SpratAnimation animation);
+SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation);
+void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime);
+void PlaySpratAnimation(SpratAnimationPlayer *player);
+void StopSpratAnimation(SpratAnimationPlayer *player);
+void PauseSpratAnimation(SpratAnimationPlayer *player);
+void ResumeSpratAnimation(SpratAnimationPlayer *player);
+void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed);
+bool IsSpratAnimationPlaying(SpratAnimationPlayer player);
+bool IsSpratAnimationFinished(SpratAnimationPlayer player);
+int GetSpratAnimationFrame(SpratAnimationPlayer player);
+void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint);
 ```
 
 ### The sheet
@@ -164,16 +178,43 @@ size.
 
 ### Animations
 
-`GetSpratAnimationFrame()` gives the frame index shown after `time` seconds of
-looped playback, and `DrawSpratAnimation()` draws it with the animation's
-flip. They keep no state: keep a time per animated thing, and reset it to
-restart. To draw an animation with your own transform, combine its flip with
-yours:
+An animation from the sheet is a template: `GetSpratAnimation()` returns it by
+name (zeroed, with a warning, when there is none; `IsSpratAnimationValid()`
+tells). Playing it takes a `SpratAnimationPlayer`, a plain struct you keep one
+of per animated thing, the way raylib's `Music` is played and updated:
 
 ```c
-int frame = GetSpratAnimationFrame(sheet, run, enemy.time);
+typedef struct SpratAnimationPlayer {
+    SpratAnimation animation;   // Animation played (shares the sheet's frame array)
+    float time;                 // Seconds into the animation, from 0 to its duration (frameCount/fps)
+    float speed;                // Playback rate: 1.0f plays at the animation's fps, negative plays in reverse
+    bool playing;               // Advanced by UpdateSpratAnimation()
+    bool loop;                  // Wrap around at the end, otherwise stop on the last frame
+} SpratAnimationPlayer;
+```
+
+`MakeSpratAnimationPlayer()` returns one already playing, looping, at speed
+`1.0f`; it allocates nothing, so copy it or drop it freely. Call
+`UpdateSpratAnimation(&player, GetFrameTime())` once per frame: time only moves
+while you update it, so pausing the game, slow motion or a fixed time step
+apply to animations too. `PauseSpratAnimation()` and `ResumeSpratAnimation()`
+keep the time, `PlaySpratAnimation()` restarts and `StopSpratAnimation()`
+rewinds without playing.
+
+A negative speed plays in reverse, and `PlaySpratAnimation()` then starts from
+the last frame. Set `loop` to `false` to play once: the player stops on the
+last frame it reaches (the first when reversed) and `IsSpratAnimationFinished()`
+becomes true. The fields are yours to read and set, `time` included.
+
+`GetSpratAnimationFrame()` gives the frame shown now, an index into
+`sheet.frames`, for its markers or a hitbox. `DrawSpratAnimation()` draws it with
+the animation's flip. To draw it with your own transform, combine that flip
+with yours:
+
+```c
+int frame = GetSpratAnimationFrame(enemy.walk);
 DrawSpratFramePro(sheet, frame, enemy.position, (Vector2){ 2, 2 }, 0.0f,
-                  sheet.animations[run].flip ^ enemy.flip, WHITE);
+                  enemy.walk.animation.flip ^ enemy.flip, WHITE);
 ```
 
 ### Markers
@@ -257,9 +298,8 @@ The sheet in `examples/resources/` was packed with sprat-cli by
 - Atlas paths are used as written, so a sheet from an untrusted source could
   name any file. Parse such a sheet with sprat-lib first and check each
   `atlases[i].path` with `sprat_path_is_safe()` before loading it here.
-- `GetSpratAnimationFrame()` takes a `float` time, which loses
-  precision after hours: keep a time per animation rather than passing
-  `GetTime()` for a long-running game.
+- The sheet format has no loop setting yet: every player loops until you set
+  `loop` to `false`.
 
 ## License
 

@@ -5,6 +5,7 @@
 *   Controls:
 *       LEFT/RIGHT  Run
 *       SPACE       Swing the sword
+*       P           Pause and resume the spins
 *       D           Show pivots and hitboxes
 *
 *   Resources: resources/sheet.sprat and resources/atlas.png, packed by sprat-cli
@@ -65,10 +66,17 @@ int main(void)
 
     SpratSheet sheet = LoadSpratSheet("resources/sheet.sprat");
 
-    // Look names up once, then draw by index
-    int run = GetSpratAnimationIndex(sheet, "run");
-    int runLeft = GetSpratAnimationIndex(sheet, "run-left");
-    int spin = GetSpratAnimationIndex(sheet, "spin");
+    // Look names up once, then draw by index, and play animations with a player each
+    SpratAnimationPlayer run = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "run"));
+    SpratAnimationPlayer runLeft = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "run-left"));
+    SpratAnimationPlayer heroRun = run;
+    const float spinSpeeds[3] = { 1.0f, 0.5f, -1.0f };     // normal, half speed, reversed
+    SpratAnimationPlayer spins[3] = { 0 };
+    for (int i = 0; i < 3; i++)
+    {
+        spins[i] = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "spin"));
+        SetSpratAnimationSpeed(&spins[i], spinSpeeds[i]);
+    }
     int idle = GetSpratFrameIndex(sheet, "hero/run_01.png");
     int sword = GetSpratFrameIndex(sheet, "sword");
     int panel = GetSpratFrameIndex(sheet, "panel");
@@ -77,7 +85,6 @@ int main(void)
     Vector2 heroScale = { HERO_SCALE, HERO_SCALE };
     Vector2 swordScale = { SWORD_SCALE, SWORD_SCALE };
     int facing = 0;                 // 0 or SPRAT_FLIP_HORIZONTAL
-    float runTime = 0.0f;
     float swingTime = 0.0f;
     bool debug = false;
 
@@ -97,8 +104,21 @@ int main(void)
         if (hero.x < 0.0f) hero.x = 0.0f;
         if (hero.x > screenWidth) hero.x = (float)screenWidth;
 
-        if (running) runTime += dt;
-        else runTime = 0.0f;
+        if (running) UpdateSpratAnimation(&heroRun, dt);
+        else StopSpratAnimation(&heroRun);
+
+        UpdateSpratAnimation(&run, dt);
+        UpdateSpratAnimation(&runLeft, dt);
+        for (int i = 0; i < 3; i++) UpdateSpratAnimation(&spins[i], dt);
+
+        if (IsKeyPressed(KEY_P))
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                if (IsSpratAnimationPlaying(spins[i])) PauseSpratAnimation(&spins[i]);
+                else ResumeSpratAnimation(&spins[i]);
+            }
+        }
 
         if (IsKeyPressed(KEY_SPACE)) swingTime = SWING_TIME;
         if (swingTime > 0.0f) swingTime -= dt;
@@ -106,7 +126,7 @@ int main(void)
         if (IsKeyPressed(KEY_D)) debug = !debug;
 
         // The run animation's first frame doubles as the idle pose
-        int heroFrame = running? GetSpratAnimationFrame(sheet, run, runTime) : idle;
+        int heroFrame = running? GetSpratAnimationFrame(heroRun) : idle;
 
         // The sword is held by the hero's "hand" marker, mirrored with the hero
         Vector2 hand = hero;
@@ -129,15 +149,19 @@ int main(void)
 
             DrawSpratFrameNPatch(sheet, panel, panelRec, WHITE);
             DrawText("DrawSpratFrameNPatch()", (int)panelRec.x + 20, (int)panelRec.y + 24, 20, RAYWHITE);
-            DrawText("LEFT/RIGHT run, SPACE swing\nD shows pivots and hitboxes", (int)panelRec.x + 20, (int)panelRec.y + 56, 10, LIGHTGRAY);
+            DrawText("LEFT/RIGHT run, SPACE swing\nD pivots and hitboxes, P pause", (int)panelRec.x + 20, (int)panelRec.y + 56, 10, LIGHTGRAY);
 
             // Looping animations, with the flip the sheet gave each one
             DrawText("run", 470, 40, 10, GRAY);
             DrawText("run-left (alias, flip h)", 580, 40, 10, GRAY);
             DrawText("spin", 735, 40, 10, GRAY);
-            DrawSpratAnimation(sheet, run, t, (Vector2){ 490, 150 }, WHITE);
-            DrawSpratAnimation(sheet, runLeft, t, (Vector2){ 630, 150 }, WHITE);
-            for (int i = 0; i < 3; i++) DrawSpratAnimation(sheet, spin, t + i*0.2f, (Vector2){ 750, 90.0f + i*40 }, WHITE);
+            DrawSpratAnimation(sheet, run, (Vector2){ 490, 150 }, WHITE);
+            DrawSpratAnimation(sheet, runLeft, (Vector2){ 630, 150 }, WHITE);
+            for (int i = 0; i < 3; i++)
+            {
+                DrawSpratAnimation(sheet, spins[i], (Vector2){ 750, 90.0f + i*40 }, WHITE);
+                DrawText(TextFormat("x%g", spinSpeeds[i]), 770, 85 + i*40, 10, GRAY);
+            }
 
             // Every frame, rotated around its pivot
             for (int i = 0; i < sheet.frameCount; i++)
