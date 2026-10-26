@@ -98,13 +98,24 @@ void UnloadSpratSheet(SpratSheet sheet);
 // Sheet query functions
 int GetSpratFrameIndex(SpratSheet sheet, const char *pathOrName);
 const SpratMarker *GetSpratFrameMarker(SpratSheet sheet, int frame, const char *name);
-Vector2 GetSpratFramePoint(SpratSheet sheet, int frame, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip);
 
 // Sheet drawing functions
 void DrawSpratFrame(SpratSheet sheet, int frame, Vector2 position, Color tint);
 void DrawSpratFrameEx(SpratSheet sheet, int frame, Vector2 position, float rotation, float scale, Color tint);
-void DrawSpratFramePro(SpratSheet sheet, int frame, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
 void DrawSpratFrameNPatch(SpratSheet sheet, int frame, Rectangle dest, Color tint);
+
+// Sprite functions
+SpratSprite MakeSpratSprite(SpratSheet sheet, int frame, Vector2 position);
+void DrawSpratSprite(SpratSprite sprite, Color tint);
+Vector2 GetSpratSpritePoint(SpratSprite sprite, Vector2 point);
+const SpratMarker *GetSpratSpriteMarker(SpratSprite sprite, const char *name);
+
+// Marker functions
+Vector2 GetSpratMarkerCenter(SpratSprite sprite, const SpratMarker *marker);
+int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2 *points, int maxPoints);
+void DrawSpratMarker(SpratSprite sprite, const SpratMarker *marker, Color color);
+bool CheckCollisionSpratMarkers(SpratSprite spriteA, const SpratMarker *markerA, SpratSprite spriteB, const SpratMarker *markerB);
+bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, const SpratMarker *marker);
 
 // Animation functions
 SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name);
@@ -165,11 +176,33 @@ Every draw function places a frame by its **pivot**, the point
 original image, when there was none). Trimmed margins are left out, and
 frames that were packed turned are drawn upright.
 
-`DrawSpratFramePro()` scales the frame, mirrors it about its pivot with
-`SPRAT_FLIP_HORIZONTAL` and/or `SPRAT_FLIP_VERTICAL`, then turns it clockwise
+`DrawSpratFrame()` and `DrawSpratFrameEx()` are the shorthands raylib users
+expect. For anything more, place the frame with a sprite.
+
+### Sprites
+
+A `SpratSprite` is a frame placed on the screen. It is a plain struct the
+program owns and changes directly, such as `frame` from
+`GetSpratAnimationFrame()` every update:
+
+```c
+typedef struct SpratSprite {
+    SpratSheet sheet;           // Sheet the frame belongs to (shared, not owned: unload the sheet once)
+    int frame;                  // Frame index in sheet.frames
+    Vector2 position;           // Screen position of the frame's pivot
+    Vector2 scale;              // Scale around the pivot, negative to mirror
+    float rotation;             // Clockwise rotation around the pivot, in degrees
+    int flip;                   // Flip flags around the pivot (SpratFlip)
+} SpratSprite;
+```
+
+The frame is scaled, then mirrored about its pivot with
+`SPRAT_FLIP_HORIZONTAL` and/or `SPRAT_FLIP_VERTICAL`, then turned clockwise
 around the pivot by `rotation` degrees, the same convention as
-`DrawTexturePro()`. `DrawSpratFrame()` and `DrawSpratFrameEx()` are the
-shorthands raylib users expect.
+`DrawTexturePro()`. `DrawSpratSprite()` draws it, and the marker functions
+place markers with the same transform, so what is drawn and what collides
+always agree. `MakeSpratSprite()` returns one unscaled, unrotated and
+unflipped; a zeroed sprite has a scale of 0 and draws nothing.
 
 `scale` is yours to choose, and is not `sheet.scale`: frame geometry is in atlas
 pixels, so `1.0f` draws atlas pixels one to one. For a sheet packed at
@@ -208,34 +241,52 @@ becomes true. The fields are yours to read and set, `time` included.
 
 `GetSpratAnimationFrame()` gives the frame shown now, an index into
 `sheet.frames`, for its markers or a hitbox. `DrawSpratAnimation()` draws it with
-the animation's flip. To draw it with your own transform, combine that flip
-with yours:
+the animation's flip. To draw it with your own transform, put it in a sprite
+and combine that flip with yours:
 
 ```c
-int frame = GetSpratAnimationFrame(enemy.walk);
-DrawSpratFramePro(sheet, frame, enemy.position, (Vector2){ 2, 2 }, 0.0f,
-                  enemy.walk.animation.flip ^ enemy.flip, WHITE);
+enemy.sprite.frame = GetSpratAnimationFrame(enemy.walk);
+enemy.sprite.flip = enemy.walk.animation.flip ^ enemy.facing;
+DrawSpratSprite(enemy.sprite, WHITE);
 ```
 
 ### Markers
 
-Markers (`pivot`, hitboxes, hands, spawn points...) are in original-image
-pixels. `GetSpratFramePoint()` takes the same transform as `DrawSpratFramePro()`
-and tells where a point of the original image lands on screen, for attaching
-items or placing collision shapes:
+Markers (`pivot`, hitboxes, hands, spawn points...) are points, circles,
+rectangles and polygons in original-image pixels. They mean something once
+placed with a sprite of their frame, and each frame has its own, so look them
+up again when the sprite's frame changes:
 
 ```c
-const SpratMarker *hand = GetSpratFrameMarker(sheet, frame, "hand");
-if (hand != NULL)
-{
-    Vector2 grip = GetSpratFramePoint(sheet, frame, hand->position, hero, scale, 0.0f, flip);
-    DrawSpratFramePro(sheet, sword, grip, scale, swordAngle, 0, WHITE);
-}
+// The sword is held by the hero's "hand" marker, mirrored with the hero
+sword.position = GetSpratMarkerCenter(hero, GetSpratSpriteMarker(hero, "hand"));
+
+// A coin is picked when the hero's hitbox touches the coin's
+if (CheckCollisionSpratMarkers(hero, GetSpratSpriteMarker(hero, "hitbox"),
+                               coin, GetSpratSpriteMarker(coin, "hitbox"))) ...
+
+if (debug) DrawSpratMarker(hero, GetSpratSpriteMarker(hero, "hitbox"), RED);
 ```
 
-A rectangle marker's `position` is its top-left corner; once mirrored, take
-both corners through `GetSpratFramePoint()` and order them, as the example's
-`DrawHitbox()` does.
+- `GetSpratMarkerCenter()` gives where a marker is: a point's point, a circle's
+  center, a rectangle's middle or a polygon's centroid (outside a concave
+  polygon whose middle is cut away). `GetSpratSpritePoint()` places any point
+  of the original image.
+- `CheckCollisionSpratMarkers()` compares the placed shapes exactly: a
+  rectangle turns with its sprite, a circle scaled unevenly is an ellipse, and
+  polygons may be concave. Touching counts, and so does a shape inside the
+  other. The sprites may come from different sheets, and a marker need not
+  belong to its sprite's frame: a program-made `SpratMarker` in the frame's
+  original-image pixels works too, such as an attack range.
+  `CheckCollisionPointSpratMarker()` tests a screen point, such as the mouse.
+- `GetSpratMarkerOutline()` fills a closed outline for `DrawLineStrip()` and,
+  like `snprintf()`, returns how many points it has (pass `NULL` and 0 to
+  count them). `DrawSpratMarker()` draws it, with a cross for a point.
+
+Markers are passed by pointer so that a lookup's `NULL`, for a frame without
+that marker, goes straight in: nothing collides with it,
+`GetSpratMarkerCenter()` returns the sprite's position and the outline is
+empty. None of them log, since they run every frame.
 
 ### Nine-slices
 
@@ -286,7 +337,9 @@ valid until `UnloadSpratSheet()`. `sheet.frames` is its start, so it is not
 [`examples/sprite_sheet.c`](examples/sprite_sheet.c) draws every frame of the
 example sheet (most of them stored turned in the atlas), plays the `run`,
 `run-left` and `spin` animations, resizes a nine-patch panel, and lets you run
-a hero holding a sword at its `hand` marker. `D` shows pivots and hitboxes.
+a hero holding a sword at its `hand` marker, picking up spinning coins its
+hitbox or the sword's `blade` touches. `D` shows pivots, hitboxes and the
+blade.
 
 The sheet in `examples/resources/` was packed with sprat-cli by
 `make_resources.sh`, from frames drawn by `make_sources.py`.
