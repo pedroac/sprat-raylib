@@ -1,6 +1,6 @@
 /**********************************************************************************************
 *
-*   sprat-raylib v0.2.0 - Load and draw sprat-cli sprite sheets with raylib
+*   sprat-raylib v0.5.0 - Load and draw sprat-cli sprite sheets with raylib
 *
 *   DESCRIPTION:
 *       Loads the metadata written by `spratconvert --transform raw` (through sprat-lib)
@@ -19,6 +19,17 @@
 *           ...
 *           UnloadSpratSheet(sheet);
 *
+*       A SpratSprite is a frame placed on the screen: drawn there, and its markers placed
+*       there, so what is drawn and what collides always agree.
+*
+*           SpratSprite hero = MakeSpratSprite(sheet, -1, position);
+*           ...
+*           SetSpratAnimation(&run, running? runAnimation : idleAnimation);  // restarts only on a change
+*           UpdateSpratSpriteAnimation(&hero, &run, GetFrameTime());         // sets hero's frame and flip
+*           const SpratMarker *hitbox = GetSpratSpriteMarker(hero, "hitbox");
+*           if (CheckCollisionSpratMarkers(hero, hitbox, coin, coinHitbox)) ...
+*           DrawSpratSprite(hero, WHITE);
+*
 *       Frames keep the order of the sprites in the sheet, and animations the order of
 *       the sheet's animations, so indexes from sprat_sheet_bind() work as they are.
 *
@@ -31,7 +42,7 @@
 *
 *   DEPENDENCIES:
 *       raylib 5.5 or newer     - Textures, drawing, file loading and logging
-*       sprat-lib 0.5 or newer  - Parsing and validating the .sprat file (implementation only)
+*       sprat-lib 0.7 or newer  - Parsing and validating the .sprat file (implementation only)
 *
 *   COORDINATES:
 *       Frame geometry (pivot, content, size, slice, markers) is in original-image pixels,
@@ -49,7 +60,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.2.0"
+#define SPRAT_RAYLIB_VERSION    "0.5.0"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)
@@ -71,6 +82,12 @@ typedef enum {
     SPRAT_FLIP_VERTICAL = 2     // Mirror around the pivot's horizontal axis
 } SpratFlip;
 
+// Loop mode flags, combined with | (none repeats the animation forward)
+typedef enum {
+    SPRAT_LOOP_MODE_ONCE = 1,       // Play one pass and stop: on the last frame, or with ping-pong on the first
+    SPRAT_LOOP_MODE_PINGPONG = 2    // Play forward then backward, without repeating the end frames
+} SpratLoopMode;
+
 // Marker shape
 typedef enum {
     SPRAT_MARKER_TYPE_POINT = 0,    // position
@@ -88,6 +105,7 @@ typedef enum {
 } SpratSliceMode;
 
 // Named shape attached to a frame (pivot, hitbox, spawn point...), in original-image pixels
+// NOTE: A marker means something once placed with a sprite of its frame: see SpratSprite
 typedef struct SpratMarker {
     const char *name;       // Marker name
     int type;               // Marker shape (SpratMarkerType)
@@ -130,15 +148,15 @@ typedef struct SpratAnimation {
     int *frames;            // Frame indexes, in play order
     int frameCount;         // Frame index count (may be 0)
     int flip;               // Flip flags the animation is played with (SpratFlip)
+    int loop;               // Loop mode flags the animation is played with (SpratLoopMode)
 } SpratAnimation;
 
 // Playback of an animation: keep one per animated thing and update it every frame
 typedef struct SpratAnimationPlayer {
-    SpratAnimation animation;   // Animation played (shares the sheet's frame array)
-    float time;                 // Seconds into the animation, from 0 to its duration (frameCount/fps)
+    SpratAnimation animation;   // Animation played (shares the sheet's frame array), with its flip and loop flags
+    float time;                 // Seconds into one pass of the animation, from 0 to its duration
     float speed;                // Playback rate: 1.0f plays at the animation's fps, negative plays in reverse
     bool playing;               // Advanced by UpdateSpratAnimation()
-    bool loop;                  // Wrap around at the end, otherwise stop on the last frame
 } SpratAnimationPlayer;
 
 // Sprite sheet: atlas textures, frames and animations
@@ -151,6 +169,18 @@ typedef struct SpratSheet {
     SpratAnimation *animations; // Animations, in sheet order
     float scale;                // Scale the art was packed at: draw at 1.0f/scale for its original size
 } SpratSheet;
+
+// Frame placed on the screen: scaled, then flipped, then rotated clockwise around its pivot
+// NOTE: A plain struct owned by the program: change its fields directly, such as frame from
+// GetSpratAnimationFrame() every update. A scale of 1.0f draws atlas pixels one to one
+typedef struct SpratSprite {
+    SpratSheet sheet;           // Sheet the frame belongs to (shared, not owned: unload the sheet once)
+    int frame;                  // Frame index in sheet.frames
+    Vector2 position;           // Screen position of the frame's pivot
+    Vector2 scale;              // Scale around the pivot, negative to mirror
+    float rotation;             // Clockwise rotation around the pivot, in degrees
+    int flip;                   // Flip flags around the pivot (SpratFlip)
+} SpratSprite;
 
 #if defined(__cplusplus)
 extern "C" {            // Prevents name mangling of functions
@@ -169,18 +199,30 @@ SPRATAPI void UnloadSpratSheet(SpratSheet sheet);                              /
 // Sheet query functions
 SPRATAPI int GetSpratFrameIndex(SpratSheet sheet, const char *pathOrName);     // Get frame index by sprite path, or by name when it is unique, -1 if not found
 SPRATAPI const SpratMarker *GetSpratFrameMarker(SpratSheet sheet, int frame, const char *name); // Get frame marker by name, NULL if not found
-SPRATAPI Vector2 GetSpratFramePoint(SpratSheet sheet, int frame, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip); // Get screen position of an original-image point, drawn as DrawSpratFramePro() would
 
 // Sheet drawing functions
 SPRATAPI void DrawSpratFrame(SpratSheet sheet, int frame, Vector2 position, Color tint); // Draw a frame with its pivot at position
 SPRATAPI void DrawSpratFrameEx(SpratSheet sheet, int frame, Vector2 position, float rotation, float scale, Color tint); // Draw a frame with rotation and scale around its pivot
-SPRATAPI void DrawSpratFramePro(SpratSheet sheet, int frame, Vector2 position, Vector2 scale, float rotation, int flip, Color tint); // Draw a frame with scale, rotation and flip around its pivot
 SPRATAPI void DrawSpratFrameNPatch(SpratSheet sheet, int frame, Rectangle dest, Color tint); // Draw a frame stretched to dest, keeping its nine-slice borders unscaled
+
+// Sprite functions
+SPRATAPI SpratSprite MakeSpratSprite(SpratSheet sheet, int frame, Vector2 position); // Make a sprite of a frame with its pivot at position, unscaled, unrotated and unflipped
+SPRATAPI void DrawSpratSprite(SpratSprite sprite, Color tint);                 // Draw a sprite: its frame scaled, flipped and rotated around the pivot at its position
+SPRATAPI Vector2 GetSpratSpritePoint(SpratSprite sprite, Vector2 point);       // Get screen position of an original-image point of the sprite's frame
+SPRATAPI const SpratMarker *GetSpratSpriteMarker(SpratSprite sprite, const char *name); // Get marker of the sprite's frame by name, NULL if not found
+
+// Marker functions (markers in the original-image pixels of the sprite's frame, placed as the sprite is drawn)
+SPRATAPI Vector2 GetSpratMarkerCenter(SpratSprite sprite, const SpratMarker *marker); // Get screen position of a marker's point, or of its shape's center
+SPRATAPI int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2 *points, int maxPoints); // Get a marker's closed outline in screen coordinates, returns its point count
+SPRATAPI void DrawSpratMarker(SpratSprite sprite, const SpratMarker *marker, Color color); // Draw a marker's outline (a cross for a point)
+SPRATAPI bool CheckCollisionSpratMarkers(SpratSprite spriteA, const SpratMarker *markerA, SpratSprite spriteB, const SpratMarker *markerB); // Check collision between markers of two sprites
+SPRATAPI bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, const SpratMarker *marker); // Check if a screen point is inside a sprite's marker
 
 // Animation functions
 SPRATAPI SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name); // Get animation by name, zeroed if not found
 SPRATAPI bool IsSpratAnimationValid(SpratAnimation animation);                 // Check if an animation is valid (found in a sheet; it may have no frames)
-SPRATAPI SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation); // Make a player for an animation: playing, looping, at speed 1.0f
+SPRATAPI SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation); // Make a player for an animation: playing from its start, at speed 1.0f
+SPRATAPI void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation); // Set the animation played: restart with it, keeping the speed, unless it is the one played
 SPRATAPI void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime); // Advance a playing animation by deltaTime seconds, scaled by its speed
 SPRATAPI void PlaySpratAnimation(SpratAnimationPlayer *player);                // Play an animation from its start (its end when the speed is negative)
 SPRATAPI void StopSpratAnimation(SpratAnimationPlayer *player);                // Stop an animation and rewind it to where PlaySpratAnimation() starts
@@ -188,9 +230,13 @@ SPRATAPI void PauseSpratAnimation(SpratAnimationPlayer *player);               /
 SPRATAPI void ResumeSpratAnimation(SpratAnimationPlayer *player);              // Resume a paused animation
 SPRATAPI void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed); // Set playback rate (1.0f is the animation's fps, negative plays in reverse)
 SPRATAPI bool IsSpratAnimationPlaying(SpratAnimationPlayer player);            // Check if an animation is playing
-SPRATAPI bool IsSpratAnimationFinished(SpratAnimationPlayer player);           // Check if a non-looping animation reached its end in the direction it plays
+SPRATAPI bool IsSpratAnimationFinished(SpratAnimationPlayer player);           // Check if a SPRAT_LOOP_MODE_ONCE animation reached its end in the direction it plays
 SPRATAPI int GetSpratAnimationFrame(SpratAnimationPlayer player);              // Get frame index shown now (an index into sheet.frames), -1 if none
+SPRATAPI void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player); // Set a sprite's frame to the one shown now, and its flip to the animation's
+SPRATAPI void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime); // Advance an animation by deltaTime seconds, then set the sprite's frame and flip from it
 SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint); // Draw the frame shown now, with the animation's flip
+SPRATAPI void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint); // Draw the frame shown now, with the animation's flip, rotation and scale around its pivot
+SPRATAPI void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint); // Draw the frame shown now, scaled, flipped (flip combined with the animation's) and rotated around its pivot
 
 #if defined(__cplusplus)
 }
@@ -209,7 +255,7 @@ SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, 
 #include "sprat/sprat.h"    // Required for: sprat_sheet_load_memory(), sprat_sheet_free()...
 
 #include <limits.h>         // Required for: INT_MAX
-#include <math.h>           // Required for: sinf(), cosf(), floor(), ceil(), fmod(), isfinite()
+#include <math.h>           // Required for: sin(), cos(), acos(), atan2(), sqrt(), floor(), ceil(), fmod(), isfinite()
 #include <stdint.h>         // Required for: SIZE_MAX, uintptr_t
 #include <stdlib.h>         // Required for: calloc(), free() [Used in RL_CALLOC(), RL_FREE()]
 #include <string.h>         // Required for: strlen(), strcmp(), memcpy()
@@ -217,6 +263,11 @@ SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, 
 #ifndef SPRAT_MAX_PATH_LENGTH
     #define SPRAT_MAX_PATH_LENGTH   4096    // Maximum length of an atlas path, joined with its folder
 #endif
+
+#define SPRAT_PI_D                  3.14159265358979323846
+#define SPRAT_OUTLINE_TOLERANCE     0.25    // Distance a circle outline may stray from the curve, in screen pixels
+#define SPRAT_MAX_CIRCLE_SIDES      256     // Maximum sides of a circle outline
+#define SPRAT_UNIT_TOLERANCE        1e-9    // Distance past touching, in an ellipse's unit space, that still counts as touching
 
 //----------------------------------------------------------------------------------
 // Types and Structures Definition (internal)
@@ -230,6 +281,40 @@ typedef struct SpratDrawCall {
     float rotation;
 } SpratDrawCall;
 
+// Point in double precision, for marker geometry
+typedef struct SpratPoint {
+    double x;
+    double y;
+} SpratPoint;
+
+// Placement of original-image points: position + m*(point - pivot)
+// NOTE: m scales, then flips, then rotates clockwise: the same transform the frame is drawn with
+typedef struct SpratPlacement {
+    double m[4];
+    SpratPoint pivot;
+    SpratPoint position;
+} SpratPlacement;
+
+// Marker placed on the screen: a polygon (a point or a segment with one or two vertices),
+// or an ellipse, the image of the unit disk by center + l
+typedef struct SpratShape {
+    bool circle;                // Placed from a circle marker: center and l are set, even when flattened
+    bool ellipse;
+    SpratPoint center;
+    double l[4];
+    int vertexCount;
+    SpratPoint points[4];       // Vertices of a point, a rectangle or a flattened ellipse
+    const Vector2 *vertices;    // Or vertices of a polygon marker, placed by placement
+    SpratPlacement placement;
+} SpratShape;
+
+// Where shapes are compared: the screen, or the unit space of an ellipse, where it is the unit disk
+// NOTE: A screen point p is at inverse*(p - origin)
+typedef struct SpratSpace {
+    SpratPoint origin;
+    double inverse[4];
+} SpratSpace;
+
 //----------------------------------------------------------------------------------
 // Module Internal Functions Declaration
 //----------------------------------------------------------------------------------
@@ -237,8 +322,15 @@ static SpratSheet SpratLoadSheetData(const unsigned char *fileData, int dataSize
 static SpratSheet SpratConvertSheet(const sprat_sheet *raw);
 static bool SpratJoinPath(char *buffer, int bufferSize, const char *dir, const char *path);
 static bool SpratIsFrameDrawable(SpratSheet sheet, int frame);
+static double SpratGetAnimationStepCount(SpratAnimation animation);
 static float SpratGetAnimationDuration(SpratAnimation animation);
-static Vector2 SpratTransformPoint(Vector2 pivot, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip);
+static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip);
+static SpratPlacement SpratGetPlacement(Vector2 pivot, Vector2 position, Vector2 scale, float rotation, int flip);
+static SpratPoint SpratPlacePoint(const SpratPlacement *placement, double x, double y);
+static bool SpratGetSpritePlacement(SpratSprite sprite, SpratPlacement *placement);
+static bool SpratGetMarkerShape(SpratSprite sprite, const SpratMarker *marker, SpratShape *shape);
+static SpratPoint SpratGetScreenVertex(const SpratShape *shape, int i);
+static bool SpratShapesOverlap(const SpratShape *a, const SpratShape *b);
 static Rectangle SpratGetStoredRegion(const SpratFrame *frame, float u0, float v0, float u1, float v1);
 static SpratDrawCall SpratGetRegionDrawCall(const SpratFrame *frame, Rectangle source, Vector2 center, Vector2 size, float rotation, int flip);
 static SpratDrawCall SpratGetFrameDrawCall(const SpratFrame *frame, Vector2 position, Vector2 scale, float rotation, int flip);
@@ -365,36 +457,21 @@ const SpratMarker *GetSpratFrameMarker(SpratSheet sheet, int frame, const char *
     return NULL;
 }
 
-// Get screen position of an original-image point, drawn as DrawSpratFramePro() would
-// NOTE: Use it to place markers, hitboxes or attachments on a drawn frame
-Vector2 GetSpratFramePoint(SpratSheet sheet, int frame, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip)
-{
-    if ((frame < 0) || (frame >= sheet.frameCount)) return position;
-
-    return SpratTransformPoint(sheet.frames[frame].pivot, point, position, scale, rotation, flip);
-}
-
 // Draw a frame with its pivot at position
 void DrawSpratFrame(SpratSheet sheet, int frame, Vector2 position, Color tint)
 {
-    DrawSpratFramePro(sheet, frame, position, (Vector2){ 1.0f, 1.0f }, 0.0f, 0, tint);
+    DrawSpratSprite(MakeSpratSprite(sheet, frame, position), tint);
 }
 
 // Draw a frame with rotation and scale around its pivot
 void DrawSpratFrameEx(SpratSheet sheet, int frame, Vector2 position, float rotation, float scale, Color tint)
 {
-    DrawSpratFramePro(sheet, frame, position, (Vector2){ scale, scale }, rotation, 0, tint);
-}
+    SpratSprite sprite = MakeSpratSprite(sheet, frame, position);
 
-// Draw a frame with scale, rotation and flip around its pivot
-void DrawSpratFramePro(SpratSheet sheet, int frame, Vector2 position, Vector2 scale, float rotation, int flip, Color tint)
-{
-    if (!SpratIsFrameDrawable(sheet, frame)) return;
+    sprite.rotation = rotation;
+    sprite.scale = (Vector2){ scale, scale };
 
-    const SpratFrame *f = &sheet.frames[frame];
-    SpratDrawCall call = SpratGetFrameDrawCall(f, position, scale, rotation, flip);
-
-    DrawTexturePro(sheet.atlases[f->atlas], call.source, call.dest, call.origin, call.rotation, tint);
+    DrawSpratSprite(sprite, tint);
 }
 
 // Draw a frame stretched to dest, keeping its nine-slice borders unscaled
@@ -413,6 +490,257 @@ void DrawSpratFrameNPatch(SpratSheet sheet, int frame, Rectangle dest, Color tin
     {
         DrawTexturePro(sheet.atlases[f->atlas], calls[i].source, calls[i].dest, calls[i].origin, calls[i].rotation, tint);
     }
+}
+
+// Make a sprite of a frame with its pivot at position, unscaled, unrotated and unflipped
+SpratSprite MakeSpratSprite(SpratSheet sheet, int frame, Vector2 position)
+{
+    SpratSprite sprite = { 0 };
+
+    sprite.sheet = sheet;
+    sprite.frame = frame;
+    sprite.position = position;
+    sprite.scale = (Vector2){ 1.0f, 1.0f };
+
+    return sprite;
+}
+
+// Draw a sprite: its frame scaled, flipped and rotated around the pivot at its position
+// NOTE: Trimmed margins are left out, and frames packed turned are drawn upright
+void DrawSpratSprite(SpratSprite sprite, Color tint)
+{
+    if (!SpratIsFrameDrawable(sprite.sheet, sprite.frame)) return;
+
+    const SpratFrame *f = &sprite.sheet.frames[sprite.frame];
+    SpratDrawCall call = SpratGetFrameDrawCall(f, sprite.position, sprite.scale, sprite.rotation, sprite.flip);
+
+    DrawTexturePro(sprite.sheet.atlases[f->atlas], call.source, call.dest, call.origin, call.rotation, tint);
+}
+
+// Get screen position of an original-image point of the sprite's frame
+// NOTE: Placed as DrawSpratSprite() places the frame; for an out-of-range frame, returns the sprite's position
+Vector2 GetSpratSpritePoint(SpratSprite sprite, Vector2 point)
+{
+    SpratPlacement placement = { 0 };
+
+    if (!SpratGetSpritePlacement(sprite, &placement)) return sprite.position;
+
+    SpratPoint p = SpratPlacePoint(&placement, point.x, point.y);
+
+    return (Vector2){ (float)p.x, (float)p.y };
+}
+
+// Get marker of the sprite's frame by name, NULL if not found
+// NOTE: Each frame has its own markers: look the marker up again when the sprite's frame changes
+const SpratMarker *GetSpratSpriteMarker(SpratSprite sprite, const char *name)
+{
+    return GetSpratFrameMarker(sprite.sheet, sprite.frame, name);
+}
+
+// Get a polygon's center in original-image pixels: its centroid, or the middle of its ends when it has no area
+// NOTE: Sums are taken around the first vertex, which keeps them small
+static SpratPoint SpratGetPolygonCenter(const Vector2 *vertices, int vertexCount)
+{
+    double x0 = vertices[0].x, y0 = vertices[0].y;
+    double minX = x0, maxX = x0, minY = y0, maxY = y0;
+    double area = 0.0, cx = 0.0, cy = 0.0;
+    SpratPoint center = { 0 };
+
+    for (int i = 0; i < vertexCount; i++)
+    {
+        double ax = vertices[i].x - x0, ay = vertices[i].y - y0;
+        double bx = vertices[(i + 1)%vertexCount].x - x0, by = vertices[(i + 1)%vertexCount].y - y0;
+        double cross = ax*by - bx*ay;
+
+        area += cross;
+        cx += (ax + bx)*cross;
+        cy += (ay + by)*cross;
+        minX = fmin(minX, vertices[i].x);
+        maxX = fmax(maxX, vertices[i].x);
+        minY = fmin(minY, vertices[i].y);
+        maxY = fmax(maxY, vertices[i].y);
+    }
+
+    if (area != 0.0)
+    {
+        center.x = x0 + cx/(3.0*area);
+        center.y = y0 + cy/(3.0*area);
+    }
+    else
+    {
+        // A point, a segment, or vertices on a line: the middle of its ends
+        center.x = (minX + maxX)/2.0;
+        center.y = (minY + maxY)/2.0;
+    }
+
+    return center;
+}
+
+// Get screen position of a marker's point, or of its shape's center
+// NOTE: The center of a circle, the middle of a rectangle, a polygon's centroid (outside a concave
+// polygon whose middle is cut away). Returns the sprite's position for a NULL or invalid marker
+Vector2 GetSpratMarkerCenter(SpratSprite sprite, const SpratMarker *marker)
+{
+    SpratShape shape = { 0 };
+    SpratPoint center = { 0 };
+
+    if (!SpratGetMarkerShape(sprite, marker, &shape)) return sprite.position;
+
+    if (shape.circle) center = shape.center;
+    else if (shape.vertices != NULL)
+    {
+        // Taken unplaced, so a frame scaled to 0 keeps it on the pivot
+        SpratPoint centroid = SpratGetPolygonCenter(shape.vertices, shape.vertexCount);
+        center = SpratPlacePoint(&shape.placement, centroid.x, centroid.y);
+    }
+    else
+    {
+        // A point, or the middle of a rectangle's corners
+        for (int i = 0; i < shape.vertexCount; i++)
+        {
+            center.x += shape.points[i].x;
+            center.y += shape.points[i].y;
+        }
+
+        center.x /= shape.vertexCount;
+        center.y /= shape.vertexCount;
+    }
+
+    return (Vector2){ (float)center.x, (float)center.y };
+}
+
+// Get the number of sides that keep a circle of this screen radius within the outline tolerance
+// NOTE: The middle of each side is radius*(1 - cos(PI/sides)) inside the curve
+static int SpratGetCircleSides(double radius)
+{
+    if (!(radius > SPRAT_OUTLINE_TOLERANCE)) return 8;
+
+    double sides = ceil(SPRAT_PI_D/acos(1.0 - SPRAT_OUTLINE_TOLERANCE/radius));
+
+    if (sides < 8.0) sides = 8.0;
+    else if (sides > SPRAT_MAX_CIRCLE_SIDES) sides = SPRAT_MAX_CIRCLE_SIDES;
+
+    return (int)sides;
+}
+
+// Get a placed shape's closed outline, returns its point count (filling only maxPoints)
+// NOTE: A circle is center + l*(cos, sin), with as many sides as its longest axis needs; a polygon,
+// a rectangle or a point is its vertices, closed by the first again unless it is a single point
+static int SpratGetShapeOutline(const SpratShape *shape, Vector2 *points, int maxPoints)
+{
+    int count = 0;
+
+    if (shape->circle)
+    {
+        const double *l = shape->l;
+        int sides = SpratGetCircleSides(fmax(hypot(l[0], l[2]), hypot(l[1], l[3])));
+
+        for (int i = 0; i <= sides; i++, count++)
+        {
+            double angle = (i < sides)? (2.0*SPRAT_PI_D*i)/sides : 0.0;
+            double cosRes = cos(angle), sinRes = sin(angle);
+
+            if (count < maxPoints) points[count] = (Vector2){ (float)(shape->center.x + l[0]*cosRes + l[1]*sinRes), (float)(shape->center.y + l[2]*cosRes + l[3]*sinRes) };
+        }
+    }
+    else
+    {
+        int closing = (shape->vertexCount > 1)? 1 : 0;
+
+        for (int i = 0; i < shape->vertexCount + closing; i++, count++)
+        {
+            if (count < maxPoints)
+            {
+                SpratPoint p = SpratGetScreenVertex(shape, i%shape->vertexCount);
+                points[count] = (Vector2){ (float)p.x, (float)p.y };
+            }
+        }
+    }
+
+    return count;
+}
+
+// Get a marker's closed outline in screen coordinates, returns its point count
+// NOTE: The outline ends on the point it starts from, so DrawLineStrip() draws the whole shape:
+// a rectangle's 4 corners from its top-left one, a polygon's vertices, or points around a circle
+// (as many as keep it within a quarter of a pixel of the curve, up to 256), each followed by the
+// first again. A point marker's outline, and a one-vertex polygon's, is that point.
+// Like snprintf(), it returns the full count but fills only maxPoints: pass NULL and 0 to count.
+// Returns 0 for a NULL or invalid marker, or an out-of-range frame
+int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2 *points, int maxPoints)
+{
+    SpratShape shape = { 0 };
+
+    if (!SpratGetMarkerShape(sprite, marker, &shape)) return 0;
+
+    return SpratGetShapeOutline(&shape, points, (points != NULL)? maxPoints : 0);
+}
+
+// Draw a marker's outline (a cross for a point)
+// NOTE: Use it to see hitboxes; it turns, mirrors and stretches with the sprite
+void DrawSpratMarker(SpratSprite sprite, const SpratMarker *marker, Color color)
+{
+    SpratShape shape = { 0 };
+
+    if (!SpratGetMarkerShape(sprite, marker, &shape)) return;
+
+    if (shape.circle)
+    {
+        Vector2 points[SPRAT_MAX_CIRCLE_SIDES + 1];
+        int count = SpratGetShapeOutline(&shape, points, SPRAT_MAX_CIRCLE_SIDES + 1);
+
+        DrawLineStrip(points, count, color);
+    }
+    else if (shape.vertexCount == 1)
+    {
+        SpratPoint vertex = SpratGetScreenVertex(&shape, 0);
+        Vector2 p = { (float)vertex.x, (float)vertex.y };
+
+        DrawLineV((Vector2){ p.x - 3.0f, p.y }, (Vector2){ p.x + 4.0f, p.y }, color);
+        DrawLineV((Vector2){ p.x, p.y - 3.0f }, (Vector2){ p.x, p.y + 4.0f }, color);
+    }
+    else
+    {
+        // Edge by edge, so a polygon of any size needs no buffer
+        SpratPoint previous = SpratGetScreenVertex(&shape, shape.vertexCount - 1);
+
+        for (int i = 0; i < shape.vertexCount; i++)
+        {
+            SpratPoint current = SpratGetScreenVertex(&shape, i);
+            DrawLineV((Vector2){ (float)previous.x, (float)previous.y }, (Vector2){ (float)current.x, (float)current.y }, color);
+            previous = current;
+        }
+    }
+}
+
+// Check collision between markers of two sprites
+// NOTE: Shapes are compared exactly, as each sprite places them: a rectangle turns with its frame,
+// and a circle scaled unevenly is an ellipse. Shapes that touch collide, and so does a shape inside
+// the other; polygons may be concave. A marker need not belong to its sprite's frame: any marker in
+// the frame's original-image pixels works. Returns false for a NULL or invalid marker
+bool CheckCollisionSpratMarkers(SpratSprite spriteA, const SpratMarker *markerA, SpratSprite spriteB, const SpratMarker *markerB)
+{
+    SpratShape a = { 0 };
+    SpratShape b = { 0 };
+
+    if (!SpratGetMarkerShape(spriteA, markerA, &a) || !SpratGetMarkerShape(spriteB, markerB, &b)) return false;
+
+    return SpratShapesOverlap(&a, &b);
+}
+
+// Check if a screen point is inside a sprite's marker
+// NOTE: Points on the marker's edge are inside, so a point marker contains only its own point
+bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, const SpratMarker *marker)
+{
+    SpratShape a = { 0 };
+    SpratShape b = { 0 };
+
+    if (!SpratGetMarkerShape(sprite, marker, &b)) return false;
+
+    a.vertexCount = 1;
+    a.points[0] = (SpratPoint){ point.x, point.y };
+
+    return SpratShapesOverlap(&a, &b);
 }
 
 // Get animation by name, zeroed if not found
@@ -440,7 +768,7 @@ bool IsSpratAnimationValid(SpratAnimation animation)
            ((animation.frameCount == 0) || (animation.frames != NULL));
 }
 
-// Make a player for an animation: playing, looping, at speed 1.0f
+// Make a player for an animation: playing from its start, at speed 1.0f
 // NOTE: A player allocates nothing: copy it, reset it or drop it freely
 SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation)
 {
@@ -449,14 +777,28 @@ SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation)
     player.animation = animation;
     player.speed = 1.0f;
     player.playing = true;
-    player.loop = true;
 
     return player;
 }
 
+// Set the animation played: restart with it, keeping the speed, unless it is the one played
+// NOTE: The one played is left as it is, stopped or finished included, so it can be set every
+// update. It is the one played when its name, frames and frame count are, so a copy with
+// another flip, loop mode or fps still is; an alias, or a copy renamed, is not
+void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation)
+{
+    if (player == NULL) return;
+
+    const SpratAnimation *played = &player->animation;
+    if ((played->name == animation.name) && (played->frames == animation.frames) && (played->frameCount == animation.frameCount)) return;
+
+    player->animation = animation;
+    PlaySpratAnimation(player);
+}
+
 // Advance a playing animation by deltaTime seconds, scaled by its speed
-// NOTE: A looping animation's time wraps around, so it stays precise however long it plays.
-// A non-looping one stops at its end, or at its start when playing in reverse
+// NOTE: A repeating animation's time wraps around, so it stays precise however long it plays.
+// A SPRAT_LOOP_MODE_ONCE one stops at its end, or at its start when playing in reverse
 void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime)
 {
     if ((player == NULL) || !player->playing) return;
@@ -467,7 +809,7 @@ void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime)
     double time = (double)player->time + (double)deltaTime*player->speed;
     if (!isfinite(time)) return;     // NaN or infinite time, step or speed: keep the last good time
 
-    if (player->loop)
+    if (!(player->animation.loop & SPRAT_LOOP_MODE_ONCE))
     {
         time = fmod(time, duration);
         if (time < 0.0) time += duration;
@@ -525,48 +867,84 @@ bool IsSpratAnimationPlaying(SpratAnimationPlayer player)
     return player.playing;
 }
 
-// Check if a non-looping animation reached its end in the direction it plays
-// NOTE: Looping animations never finish
+// Check if a SPRAT_LOOP_MODE_ONCE animation reached its end in the direction it plays
+// NOTE: Repeating animations never finish
 bool IsSpratAnimationFinished(SpratAnimationPlayer player)
 {
     float duration = SpratGetAnimationDuration(player.animation);
 
-    if (player.loop || (duration <= 0.0f)) return false;
+    if (!(player.animation.loop & SPRAT_LOOP_MODE_ONCE) || (duration <= 0.0f)) return false;
 
     return (player.speed < 0.0f)? (player.time <= 0.0f) : (player.time >= duration);
 }
 
 // Get frame index shown now (an index into sheet.frames), -1 if none
-// NOTE: Frame k covers the times [k/fps, (k + 1)/fps), or (k/fps, (k + 1)/fps] in reverse,
-// so playing from either end shows the frame at that end first
+// NOTE: Step k of a pass covers the times [k/fps, (k + 1)/fps), or (k/fps, (k + 1)/fps] in
+// reverse, so playing from either end shows the frame at that end first. With ping-pong,
+// steps past the last frame walk the frames back
 int GetSpratAnimationFrame(SpratAnimationPlayer player)
 {
     const SpratAnimation *anim = &player.animation;
+    double stepCount = SpratGetAnimationStepCount(*anim);
 
-    if ((anim->frameCount <= 0) || (anim->frames == NULL) || (anim->fps <= 0)) return -1;
+    if ((stepCount <= 0.0) || (anim->frames == NULL)) return -1;
 
     double position = (double)player.time*anim->fps;
     double step = (player.speed < 0.0f)? ceil(position) - 1.0 : floor(position);
     if (!isfinite(step)) return -1;     // NaN or infinite time: (int)step would be undefined
 
-    if (player.loop)
+    if (!(anim->loop & SPRAT_LOOP_MODE_ONCE))
     {
         // fmod() keeps the step exact and in range for any time, negative included
-        step = fmod(step, (double)anim->frameCount);
-        if (step < 0.0) step += anim->frameCount;
+        step = fmod(step, stepCount);
+        if (step < 0.0) step += stepCount;
     }
     else if (step < 0.0) step = 0.0;
-    else if (step > anim->frameCount - 1) step = anim->frameCount - 1;
+    else if (step > stepCount - 1.0) step = stepCount - 1.0;
+
+    if (step >= anim->frameCount) step = 2.0*(anim->frameCount - 1) - step;    // On the way back
 
     return anim->frames[(int)step];
+}
+
+// Set a sprite's frame to the one shown now, and its flip to the animation's
+// NOTE: The sprite's flip is replaced: mirror an animated sprite with a negative scale instead.
+// UpdateSpratSpriteAnimation() calls it every update
+void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player)
+{
+    if (sprite == NULL) return;
+
+    sprite->frame = GetSpratAnimationFrame(player);
+    sprite->flip = player.animation.flip;
+}
+
+// Advance an animation by deltaTime seconds, then set the sprite's frame and flip from it
+// NOTE: A deltaTime of 0 only sets the sprite, such as after StopSpratAnimation()
+void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime)
+{
+    if (player == NULL) return;
+
+    UpdateSpratAnimation(player, deltaTime);
+    SetSpratSpriteAnimationFrame(sprite, *player);
 }
 
 // Draw the frame shown now, with the animation's flip
 void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint)
 {
-    int frame = GetSpratAnimationFrame(player);
+    DrawSpratAnimationPro(sheet, player, position, (Vector2){ 1.0f, 1.0f }, 0.0f, 0, tint);
+}
 
-    if (frame >= 0) DrawSpratFramePro(sheet, frame, position, (Vector2){ 1.0f, 1.0f }, 0.0f, player.animation.flip, tint);
+// Draw the frame shown now, with the animation's flip, rotation and scale around its pivot
+void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint)
+{
+    DrawSpratAnimationPro(sheet, player, position, (Vector2){ scale, scale }, rotation, 0, tint);
+}
+
+// Draw the frame shown now, scaled, flipped (flip combined with the animation's) and rotated around its pivot
+// NOTE: Flipping an animation that is already flipped on an axis draws it unflipped on that axis
+void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint)
+{
+    DrawSpratSprite(SpratMakeAnimationSprite(sheet, player, position, scale, rotation, flip), tint);
 }
 
 //----------------------------------------------------------------------------------
@@ -778,6 +1156,7 @@ static SpratSheet SpratConvertSheet(const sprat_sheet *raw)
         anim->fps = src->fps;
         anim->frameCount = (int)src->frame_count;
         anim->flip = (int)src->flip;     // SPRAT_FLIP_H/V have the values of SPRAT_FLIP_HORIZONTAL/VERTICAL
+        anim->loop = (int)src->loop;     // SPRAT_LOOP_ONCE/PINGPONG have the values of SPRAT_LOOP_MODE_ONCE/PINGPONG
 
         if (src->frame_count == 0) continue;
 
@@ -847,30 +1226,99 @@ static bool SpratIsFrameDrawable(SpratSheet sheet, int frame)
     return (atlas >= 0) && (atlas < sheet.atlasCount) && (sheet.atlases[atlas].id > 0);
 }
 
-// Get animation duration in seconds, 0 for an animation without frames
-static float SpratGetAnimationDuration(SpratAnimation animation)
+// Get the number of frames shown in one pass of an animation, 0 for one without frames
+// NOTE: Ping-pong walks the frames back without repeating the last: 0 1 2 1 repeats, and
+// played once, 0 1 2 1 0 stops on the first frame. In double, so no frame count overflows it
+static double SpratGetAnimationStepCount(SpratAnimation animation)
 {
-    if ((animation.frameCount <= 0) || (animation.fps <= 0)) return 0.0f;
+    double count = animation.frameCount;
 
-    return (float)((double)animation.frameCount/animation.fps);
+    if ((count <= 0.0) || (animation.fps <= 0)) return 0.0;
+    if ((animation.loop & SPRAT_LOOP_MODE_PINGPONG) && (count > 1.0)) count = 2.0*count - ((animation.loop & SPRAT_LOOP_MODE_ONCE)? 1.0 : 2.0);
+
+    return count;
 }
 
-// Transform an original-image point: scaled, then flipped around the pivot, then rotated
-// clockwise around it, with the pivot moved to position
-static Vector2 SpratTransformPoint(Vector2 pivot, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip)
+// Get the duration of one pass of an animation in seconds, 0 for one without frames
+static float SpratGetAnimationDuration(SpratAnimation animation)
 {
-    float x = (point.x - pivot.x)*scale.x;
-    float y = (point.y - pivot.y)*scale.y;
+    double stepCount = SpratGetAnimationStepCount(animation);
 
-    if (flip & SPRAT_FLIP_HORIZONTAL) x = -x;
-    if (flip & SPRAT_FLIP_VERTICAL) y = -y;
+    if (stepCount <= 0.0) return 0.0f;
 
-    if (rotation == 0.0f) return (Vector2){ position.x + x, position.y + y };   // The common case, without trigonometry
+    return (float)(stepCount/animation.fps);
+}
 
-    float cosRes = cosf(rotation*DEG2RAD);
-    float sinRes = sinf(rotation*DEG2RAD);
+// Make the sprite DrawSpratAnimationPro() draws: the frame shown now, flipped by flip and the animation's flip
+static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip)
+{
+    SpratSprite sprite = MakeSpratSprite(sheet, -1, position);
 
-    return (Vector2){ position.x + x*cosRes - y*sinRes, position.y + x*sinRes + y*cosRes };
+    SetSpratSpriteAnimationFrame(&sprite, player);
+    sprite.scale = scale;
+    sprite.rotation = rotation;
+    sprite.flip ^= flip;
+
+    return sprite;
+}
+
+// Get the cosine and sine of a clockwise angle in degrees
+// NOTE: Quarter turns are exact, without trigonometry, so a turned point keeps whole coordinates
+static void SpratGetCosSin(double angle, double *cosRes, double *sinRes)
+{
+    double turn = fmod(angle, 360.0);
+    if (turn < 0.0) turn += 360.0;
+
+    if (turn == 0.0) { *cosRes = 1.0; *sinRes = 0.0; }
+    else if (turn == 90.0) { *cosRes = 0.0; *sinRes = 1.0; }
+    else if (turn == 180.0) { *cosRes = -1.0; *sinRes = 0.0; }
+    else if (turn == 270.0) { *cosRes = 0.0; *sinRes = -1.0; }
+    else
+    {
+        *cosRes = cos(angle*(SPRAT_PI_D/180.0));
+        *sinRes = sin(angle*(SPRAT_PI_D/180.0));
+    }
+}
+
+// Get the placement of original-image points: scaled, then flipped around the pivot, then
+// rotated clockwise around it, with the pivot moved to position
+static SpratPlacement SpratGetPlacement(Vector2 pivot, Vector2 position, Vector2 scale, float rotation, int flip)
+{
+    SpratPlacement placement = { 0 };
+    double scaleX = (flip & SPRAT_FLIP_HORIZONTAL)? -scale.x : scale.x;
+    double scaleY = (flip & SPRAT_FLIP_VERTICAL)? -scale.y : scale.y;
+    double cosRes = 1.0, sinRes = 0.0;
+
+    SpratGetCosSin(rotation, &cosRes, &sinRes);
+
+    placement.m[0] = scaleX*cosRes;
+    placement.m[1] = -scaleY*sinRes;
+    placement.m[2] = scaleX*sinRes;
+    placement.m[3] = scaleY*cosRes;
+    placement.pivot = (SpratPoint){ pivot.x, pivot.y };
+    placement.position = (SpratPoint){ position.x, position.y };
+
+    return placement;
+}
+
+// Place an original-image point on the screen
+static SpratPoint SpratPlacePoint(const SpratPlacement *placement, double x, double y)
+{
+    double dx = x - placement->pivot.x;
+    double dy = y - placement->pivot.y;
+
+    return (SpratPoint){ placement->position.x + placement->m[0]*dx + placement->m[1]*dy,
+                         placement->position.y + placement->m[2]*dx + placement->m[3]*dy };
+}
+
+// Get the placement of a sprite's frame, false for an out-of-range frame
+static bool SpratGetSpritePlacement(SpratSprite sprite, SpratPlacement *placement)
+{
+    if ((sprite.frame < 0) || (sprite.frame >= sprite.sheet.frameCount)) return false;
+
+    *placement = SpratGetPlacement(sprite.sheet.frames[sprite.frame].pivot, sprite.position, sprite.scale, sprite.rotation, sprite.flip);
+
+    return true;
 }
 
 // Get the atlas region that stores the upright content region (u0, v0)-(u1, v1)
@@ -909,13 +1357,19 @@ static SpratDrawCall SpratGetRegionDrawCall(const SpratFrame *frame, Rectangle s
 }
 
 // Get the DrawTexturePro() arguments that draw a frame with its pivot at position
+// NOTE: The content's center is placed as markers are, so what is drawn and what collides agree
 static SpratDrawCall SpratGetFrameDrawCall(const SpratFrame *frame, Vector2 position, Vector2 scale, float rotation, int flip)
 {
-    Vector2 contentCenter = { frame->content.x + frame->content.width/2.0f, frame->content.y + frame->content.height/2.0f };
-    Vector2 center = SpratTransformPoint(frame->pivot, contentCenter, position, scale, rotation, flip);
+    SpratPlacement placement = SpratGetPlacement(frame->pivot, position, scale, rotation, flip);
+    SpratPoint center = SpratPlacePoint(&placement, frame->content.x + frame->content.width/2.0, frame->content.y + frame->content.height/2.0);
+
+    // A negative scale mirrors around the pivot, as a flip does
+    if (scale.x < 0.0f) { scale.x = -scale.x; flip ^= SPRAT_FLIP_HORIZONTAL; }
+    if (scale.y < 0.0f) { scale.y = -scale.y; flip ^= SPRAT_FLIP_VERTICAL; }
+
     Vector2 size = { frame->content.width*scale.x, frame->content.height*scale.y };
 
-    return SpratGetRegionDrawCall(frame, frame->source, center, size, rotation, flip);
+    return SpratGetRegionDrawCall(frame, frame->source, (Vector2){ (float)center.x, (float)center.y }, size, rotation, flip);
 }
 
 // Get the edges of the three slices along one axis of dest
@@ -993,6 +1447,338 @@ static int SpratGetNPatchDrawCalls(const SpratFrame *frame, Rectangle dest, Spra
     }
 
     return count;
+}
+
+// Map a point by a 2x2 matrix
+static SpratPoint SpratMultiply(const double m[4], double x, double y)
+{
+    return (SpratPoint){ m[0]*x + m[1]*y, m[2]*x + m[3]*y };
+}
+
+// Get the determinant of a 2x2 matrix
+static double SpratDeterminant(const double m[4])
+{
+    return m[0]*m[3] - m[1]*m[2];
+}
+
+// Invert a 2x2 matrix of a nonzero determinant
+static void SpratInvert(const double m[4], double inverse[4])
+{
+    double det = SpratDeterminant(m);
+
+    inverse[0] = m[3]/det;
+    inverse[1] = -m[1]/det;
+    inverse[2] = -m[2]/det;
+    inverse[3] = m[0]/det;
+}
+
+// Set a shape to the ellipse center + l, or to what a radius or a scale of 0 flattens it to
+// NOTE: l's columns are where the frame's x and y axes go, scaled by the radius: a scale of 0
+// zeroes one, leaving the segment center +- the other, and a radius of 0 both, leaving a point
+static void SpratSetEllipse(SpratShape *shape, SpratPoint center, const double l[4])
+{
+    int column = ((l[0] != 0.0) || (l[2] != 0.0))? 0 : 1;
+
+    shape->center = center;
+    memcpy(shape->l, l, sizeof(shape->l));
+
+    if (SpratDeterminant(l) != 0.0) shape->ellipse = true;
+    else if ((l[column] == 0.0) && (l[column + 2] == 0.0))
+    {
+        shape->vertexCount = 1;
+        shape->points[0] = center;
+    }
+    else
+    {
+        shape->vertexCount = 2;
+        shape->points[0] = (SpratPoint){ center.x - l[column], center.y - l[column + 2] };
+        shape->points[1] = (SpratPoint){ center.x + l[column], center.y + l[column + 2] };
+    }
+}
+
+// Place a sprite's marker on the screen, false for a NULL or invalid marker or an out-of-range frame
+static bool SpratGetMarkerShape(SpratSprite sprite, const SpratMarker *marker, SpratShape *shape)
+{
+    SpratPlacement p = { 0 };
+
+    if ((marker == NULL) || !SpratGetSpritePlacement(sprite, &p)) return false;
+
+    double x0 = marker->position.x;
+    double y0 = marker->position.y;
+
+    switch (marker->type)
+    {
+        case SPRAT_MARKER_TYPE_POINT:
+        {
+            shape->vertexCount = 1;
+            shape->points[0] = SpratPlacePoint(&p, x0, y0);
+        } break;
+        case SPRAT_MARKER_TYPE_RECTANGLE:
+        {
+            double x1 = x0 + marker->size.x, y1 = y0 + marker->size.y;
+
+            shape->vertexCount = 4;
+            shape->points[0] = SpratPlacePoint(&p, x0, y0);
+            shape->points[1] = SpratPlacePoint(&p, x1, y0);
+            shape->points[2] = SpratPlacePoint(&p, x1, y1);
+            shape->points[3] = SpratPlacePoint(&p, x0, y1);
+        } break;
+        case SPRAT_MARKER_TYPE_CIRCLE:
+        {
+            double l[4] = { 0 };
+            for (int i = 0; i < 4; i++) l[i] = p.m[i]*marker->radius;
+
+            shape->circle = true;
+            SpratSetEllipse(shape, SpratPlacePoint(&p, x0, y0), l);
+        } break;
+        case SPRAT_MARKER_TYPE_POLYGON:
+        {
+            // INT_MAX vertices would overflow the count of a closed outline
+            if ((marker->vertexCount < 1) || (marker->vertexCount == INT_MAX) || (marker->vertices == NULL)) return false;
+
+            shape->vertexCount = marker->vertexCount;
+            shape->vertices = marker->vertices;
+            shape->placement = p;
+        } break;
+        default: return false;
+    }
+
+    return true;
+}
+
+// Get vertex i of a polygon shape, on the screen
+static SpratPoint SpratGetScreenVertex(const SpratShape *shape, int i)
+{
+    if (shape->vertices == NULL) return shape->points[i];
+
+    return SpratPlacePoint(&shape->placement, shape->vertices[i].x, shape->vertices[i].y);
+}
+
+// Get vertex i of a polygon shape, in a space
+static SpratPoint SpratGetVertex(const SpratShape *shape, int i, const SpratSpace *space)
+{
+    SpratPoint p = SpratGetScreenVertex(shape, i);
+
+    return SpratMultiply(space->inverse, p.x - space->origin.x, p.y - space->origin.y);
+}
+
+// Get the edge count of a polygon shape: a point is one edge to itself, a segment one back and forth
+// NOTE: Edge i runs from vertex i - 1 (the last for i = 0) to vertex i
+static int SpratGetEdgeCount(const SpratShape *shape)
+{
+    return (shape->vertexCount < 3)? 1 : shape->vertexCount;
+}
+
+// Get the cross product of o->a and o->b
+static double SpratCross(SpratPoint o, SpratPoint a, SpratPoint b)
+{
+    return (a.x - o.x)*(b.y - o.y) - (a.y - o.y)*(b.x - o.x);
+}
+
+// Check if p, known to be on the line through a and b, lies between them
+static bool SpratIsOnSegment(SpratPoint a, SpratPoint b, SpratPoint p)
+{
+    return (fmin(a.x, b.x) <= p.x) && (p.x <= fmax(a.x, b.x)) && (fmin(a.y, b.y) <= p.y) && (p.y <= fmax(a.y, b.y));
+}
+
+// Check if segments p0-p1 and q0-q1 share a point, ends included; either may be a single point
+static bool SpratSegmentsIntersect(SpratPoint p0, SpratPoint p1, SpratPoint q0, SpratPoint q1)
+{
+    double d0 = SpratCross(q0, q1, p0);
+    double d1 = SpratCross(q0, q1, p1);
+    double d2 = SpratCross(p0, p1, q0);
+    double d3 = SpratCross(p0, p1, q1);
+
+    if ((((d0 > 0.0) && (d1 < 0.0)) || ((d0 < 0.0) && (d1 > 0.0))) &&
+        (((d2 > 0.0) && (d3 < 0.0)) || ((d2 < 0.0) && (d3 > 0.0)))) return true;
+
+    return ((d0 == 0.0) && SpratIsOnSegment(q0, q1, p0)) || ((d1 == 0.0) && SpratIsOnSegment(q0, q1, p1)) ||
+           ((d2 == 0.0) && SpratIsOnSegment(p0, p1, q0)) || ((d3 == 0.0) && SpratIsOnSegment(p0, p1, q1));
+}
+
+// Check if p is inside a polygon shape of 3 vertices or more, by the even-odd rule
+// NOTE: Points on its edges are left to the edge tests
+static bool SpratIsInsidePolygon(SpratPoint p, const SpratShape *shape, const SpratSpace *space)
+{
+    SpratPoint previous = SpratGetVertex(shape, shape->vertexCount - 1, space);
+    bool inside = false;
+
+    for (int i = 0; i < shape->vertexCount; i++)
+    {
+        SpratPoint current = SpratGetVertex(shape, i, space);
+
+        if (((current.y > p.y) != (previous.y > p.y)) &&
+            (p.x < (previous.x - current.x)*(p.y - current.y)/(previous.y - current.y) + current.x)) inside = !inside;
+
+        previous = current;
+    }
+
+    return inside;
+}
+
+// Check if two polygons overlap: edges of both cross or touch, or else one is inside the other
+static bool SpratPolygonsOverlap(const SpratShape *a, const SpratShape *b)
+{
+    const SpratSpace screen = { { 0.0, 0.0 }, { 1.0, 0.0, 0.0, 1.0 } };
+
+    SpratPoint a0 = SpratGetScreenVertex(a, a->vertexCount - 1);
+
+    for (int i = 0; i < SpratGetEdgeCount(a); i++)
+    {
+        SpratPoint a1 = SpratGetScreenVertex(a, i);
+        SpratPoint b0 = SpratGetScreenVertex(b, b->vertexCount - 1);
+
+        for (int j = 0; j < SpratGetEdgeCount(b); j++)
+        {
+            SpratPoint b1 = SpratGetScreenVertex(b, j);
+
+            if (SpratSegmentsIntersect(a0, a1, b0, b1)) return true;
+
+            b0 = b1;
+        }
+
+        a0 = a1;
+    }
+
+    return ((b->vertexCount >= 3) && SpratIsInsidePolygon(SpratGetVertex(a, 0, &screen), b, &screen)) ||
+           ((a->vertexCount >= 3) && SpratIsInsidePolygon(SpratGetVertex(b, 0, &screen), a, &screen));
+}
+
+// Get the unit space of an ellipse, where it is the unit disk
+static SpratSpace SpratGetUnitSpace(const SpratShape *ellipse)
+{
+    SpratSpace space = { 0 };
+
+    space.origin = ellipse->center;
+    SpratInvert(ellipse->l, space.inverse);
+
+    return space;
+}
+
+// Get the squared distance from the origin to segment a-b
+static double SpratGetSquaredDistanceToOrigin(SpratPoint a, SpratPoint b)
+{
+    double dx = b.x - a.x, dy = b.y - a.y;
+    double length = dx*dx + dy*dy;
+    double t = 0.0;
+
+    if (length > 0.0) t = fmin(fmax(-(a.x*dx + a.y*dy)/length, 0.0), 1.0);
+
+    a.x += t*dx;
+    a.y += t*dy;
+
+    return a.x*a.x + a.y*a.y;
+}
+
+// Check if an ellipse and a polygon overlap: in the ellipse's unit space, an edge comes within 1
+// of the origin, or the origin is inside the polygon
+static bool SpratEllipseOverlapsPolygon(const SpratShape *ellipse, const SpratShape *polygon)
+{
+    SpratSpace space = SpratGetUnitSpace(ellipse);
+    SpratPoint origin = { 0.0, 0.0 };
+
+    SpratPoint p0 = SpratGetVertex(polygon, polygon->vertexCount - 1, &space);
+
+    for (int i = 0; i < SpratGetEdgeCount(polygon); i++)
+    {
+        SpratPoint p1 = SpratGetVertex(polygon, i, &space);
+
+        if (SpratGetSquaredDistanceToOrigin(p0, p1) <= 1.0 + SPRAT_UNIT_TOLERANCE) return true;
+
+        p0 = p1;
+    }
+
+    return (polygon->vertexCount >= 3) && SpratIsInsidePolygon(origin, polygon, &space);
+}
+
+// Check if two ellipses overlap: in the unit space of a, the ellipse c + l*u (|u| <= 1) that b
+// becomes holds the origin or comes within 1 of it
+// NOTE: Its nearest point is on its edge, where (l^T l + mu) u = -l^T c for the mu >= 0 that
+// gives |u| = 1, found by bisection
+static bool SpratEllipsesOverlap(const SpratShape *a, const SpratShape *b)
+{
+    SpratSpace space = SpratGetUnitSpace(a);
+    SpratPoint c = SpratMultiply(space.inverse, b->center.x - a->center.x, b->center.y - a->center.y);
+    double l[4] = {
+        space.inverse[0]*b->l[0] + space.inverse[1]*b->l[2],
+        space.inverse[0]*b->l[1] + space.inverse[1]*b->l[3],
+        space.inverse[2]*b->l[0] + space.inverse[3]*b->l[2],
+        space.inverse[2]*b->l[1] + space.inverse[3]*b->l[3]
+    };
+    double inverse[4] = { 0 };
+
+    // The origin inside b
+    SpratInvert(l, inverse);
+    SpratPoint u = SpratMultiply(inverse, -c.x, -c.y);
+    if (u.x*u.x + u.y*u.y <= 1.0 + SPRAT_UNIT_TOLERANCE) return true;
+
+    // l^T l, its eigenvalues and eigenvectors, and l^T c along them
+    double p00 = l[0]*l[0] + l[2]*l[2];
+    double p01 = l[0]*l[1] + l[2]*l[3];
+    double p11 = l[1]*l[1] + l[3]*l[3];
+    double mean = (p00 + p11)/2.0;
+    double halfDifference = (p00 - p11)/2.0;
+    double root = sqrt(halfDifference*halfDifference + p01*p01);
+    double lambda0 = mean + root;
+    double lambda1 = fmax(mean - root, 0.0);
+
+    // b's longest semi-axis, sqrt(lambda0), doesn't reach the unit circle
+    if (sqrt(c.x*c.x + c.y*c.y) - sqrt(lambda0) > 1.0 + SPRAT_UNIT_TOLERANCE) return false;
+
+    double theta = atan2(2.0*p01, p00 - p11)/2.0;
+    double e0x = cos(theta), e0y = sin(theta);
+    double e1x = -e0y, e1y = e0x;
+    double gx = l[0]*c.x + l[2]*c.y;
+    double gy = l[1]*c.x + l[3]*c.y;
+    double g0 = e0x*gx + e0y*gy;
+    double g1 = e1x*gx + e1y*gy;
+
+    // |u(mu)| falls from over 1 at mu = 0, where u is the point found above, to at most 1 at |g|
+    double low = 0.0;
+    double high = sqrt(gx*gx + gy*gy);
+
+    for (int i = 0; (i < 200) && (low < high); i++)
+    {
+        double middle = (low + high)/2.0;
+        double u0 = g0/(lambda0 + middle);
+        double u1 = (g1 == 0.0)? 0.0 : g1/(lambda1 + middle);
+
+        if ((middle == low) || (middle == high)) break;
+
+        if (u0*u0 + u1*u1 > 1.0) low = middle;
+        else high = middle;
+    }
+
+    double mu = high;
+
+    // The nearest point on b's edge, kept on it by normalizing u
+    double v0 = g0/(lambda0 + mu);
+    double v1 = (g1 == 0.0)? 0.0 : g1/(lambda1 + mu);
+    double ux = -v0*e0x - v1*e1x;
+    double uy = -v0*e0y - v1*e1y;
+    double length = sqrt(ux*ux + uy*uy);
+
+    if (length > 0.0)
+    {
+        ux /= length;
+        uy /= length;
+    }
+
+    SpratPoint nearest = SpratMultiply(l, ux, uy);
+    nearest.x += c.x;
+    nearest.y += c.y;
+
+    return nearest.x*nearest.x + nearest.y*nearest.y <= 1.0 + SPRAT_UNIT_TOLERANCE;
+}
+
+// Check if two placed shapes overlap
+static bool SpratShapesOverlap(const SpratShape *a, const SpratShape *b)
+{
+    if (a->ellipse && b->ellipse) return SpratEllipsesOverlap(a, b);
+    if (a->ellipse) return SpratEllipseOverlapsPolygon(a, b);
+    if (b->ellipse) return SpratEllipseOverlapsPolygon(b, a);
+
+    return SpratPolygonsOverlap(a, b);
 }
 
 #endif // SPRAT_RAYLIB_IMPLEMENTATION

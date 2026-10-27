@@ -39,8 +39,8 @@ endif()
 if(NOT TARGET sprat::sprat)
     FetchContent_Declare(sprat
         GIT_REPOSITORY https://github.com/pedroac/sprat-lib.git
-        GIT_TAG 0bc8aba8d487625120088dba309bbd465d2b7240   # sprat-lib main, v0.5.0
-        FIND_PACKAGE_ARGS 0.5
+        GIT_TAG 97d87dba91f20dcbe9c2c45b2bdb749ccaa9a849   # sprat-lib main, v0.7.0
+        FIND_PACKAGE_ARGS 0.7
     )
     FetchContent_MakeAvailable(sprat)
 endif()

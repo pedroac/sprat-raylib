@@ -52,7 +52,7 @@ int main(void)
 
 `src/sprat-raylib.h` is the whole library. Define `SPRAT_RAYLIB_IMPLEMENTATION` in
 exactly one C file before including it, and link raylib (5.5 or newer) and
-sprat-lib (0.5 or newer):
+sprat-lib (0.7 or newer):
 
 ```sh
 cc game.c -Isrc -I../sprat-lib/include ../sprat-lib/src/*.c -lraylib -lm
@@ -98,18 +98,30 @@ void UnloadSpratSheet(SpratSheet sheet);
 // Sheet query functions
 int GetSpratFrameIndex(SpratSheet sheet, const char *pathOrName);
 const SpratMarker *GetSpratFrameMarker(SpratSheet sheet, int frame, const char *name);
-Vector2 GetSpratFramePoint(SpratSheet sheet, int frame, Vector2 point, Vector2 position, Vector2 scale, float rotation, int flip);
 
 // Sheet drawing functions
 void DrawSpratFrame(SpratSheet sheet, int frame, Vector2 position, Color tint);
 void DrawSpratFrameEx(SpratSheet sheet, int frame, Vector2 position, float rotation, float scale, Color tint);
-void DrawSpratFramePro(SpratSheet sheet, int frame, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
 void DrawSpratFrameNPatch(SpratSheet sheet, int frame, Rectangle dest, Color tint);
+
+// Sprite functions
+SpratSprite MakeSpratSprite(SpratSheet sheet, int frame, Vector2 position);
+void DrawSpratSprite(SpratSprite sprite, Color tint);
+Vector2 GetSpratSpritePoint(SpratSprite sprite, Vector2 point);
+const SpratMarker *GetSpratSpriteMarker(SpratSprite sprite, const char *name);
+
+// Marker functions
+Vector2 GetSpratMarkerCenter(SpratSprite sprite, const SpratMarker *marker);
+int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2 *points, int maxPoints);
+void DrawSpratMarker(SpratSprite sprite, const SpratMarker *marker, Color color);
+bool CheckCollisionSpratMarkers(SpratSprite spriteA, const SpratMarker *markerA, SpratSprite spriteB, const SpratMarker *markerB);
+bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, const SpratMarker *marker);
 
 // Animation functions
 SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name);
 bool IsSpratAnimationValid(SpratAnimation animation);
 SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation);
+void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation);
 void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime);
 void PlaySpratAnimation(SpratAnimationPlayer *player);
 void StopSpratAnimation(SpratAnimationPlayer *player);
@@ -119,7 +131,11 @@ void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed);
 bool IsSpratAnimationPlaying(SpratAnimationPlayer player);
 bool IsSpratAnimationFinished(SpratAnimationPlayer player);
 int GetSpratAnimationFrame(SpratAnimationPlayer player);
+void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player);
+void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime);
 void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint);
+void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint);
+void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
 ```
 
 ### The sheet
@@ -144,10 +160,12 @@ typedef struct SpratSheet {
   the trimmed `content` region inside it, the `pivot`, the nine-slice insets
   (`slice`) and the frame's `markers`. Frame geometry is in original-image
   pixels, scaled to atlas pixels, with Y pointing down.
-- **Animations** list frame indexes in play order, with an `fps` and the `flip`
-  they are played with. Aliases are already resolved: `run-left`, an alias of
-  `run` with `flip h`, has `run`'s frames (the same array, not a copy) and `flip` set to
-  `SPRAT_FLIP_HORIZONTAL`. An animation may have no frames.
+- **Animations** list frame indexes in play order, with an `fps`, and the `flip`
+  and `loop` mode they are played with. Aliases are already resolved:
+  `run-left`, an alias of `run` with `flip h`, has `run`'s frames (the same
+  array, not a copy) and loop mode, and `flip` set to `SPRAT_FLIP_HORIZONTAL`.
+  Sheets written before loop modes (`sprat-raw 1`) load with `loop` 0. An
+  animation may have no frames.
 - **Names**: a frame's `name` is its file's basename and can repeat across
   folders; its `path` is unique. `GetSpratFrameIndex()` takes either: it
   matches the path first, then a name that only one frame has, and logs a
@@ -165,11 +183,33 @@ Every draw function places a frame by its **pivot**, the point
 original image, when there was none). Trimmed margins are left out, and
 frames that were packed turned are drawn upright.
 
-`DrawSpratFramePro()` scales the frame, mirrors it about its pivot with
-`SPRAT_FLIP_HORIZONTAL` and/or `SPRAT_FLIP_VERTICAL`, then turns it clockwise
+`DrawSpratFrame()` and `DrawSpratFrameEx()` are the shorthands raylib users
+expect. For anything more, place the frame with a sprite.
+
+### Sprites
+
+A `SpratSprite` is a frame placed on the screen. It is a plain struct the
+program owns and changes directly; `UpdateSpratSpriteAnimation()` sets its
+`frame` and `flip` from an animation player every update:
+
+```c
+typedef struct SpratSprite {
+    SpratSheet sheet;           // Sheet the frame belongs to (shared, not owned: unload the sheet once)
+    int frame;                  // Frame index in sheet.frames
+    Vector2 position;           // Screen position of the frame's pivot
+    Vector2 scale;              // Scale around the pivot, negative to mirror
+    float rotation;             // Clockwise rotation around the pivot, in degrees
+    int flip;                   // Flip flags around the pivot (SpratFlip)
+} SpratSprite;
+```
+
+The frame is scaled, then mirrored about its pivot with
+`SPRAT_FLIP_HORIZONTAL` and/or `SPRAT_FLIP_VERTICAL`, then turned clockwise
 around the pivot by `rotation` degrees, the same convention as
-`DrawTexturePro()`. `DrawSpratFrame()` and `DrawSpratFrameEx()` are the
-shorthands raylib users expect.
+`DrawTexturePro()`. `DrawSpratSprite()` draws it, and the marker functions
+place markers with the same transform, so what is drawn and what collides
+always agree. `MakeSpratSprite()` returns one unscaled, unrotated and
+unflipped; a zeroed sprite has a scale of 0 and draws nothing.
 
 `scale` is yours to choose, and is not `sheet.scale`: frame geometry is in atlas
 pixels, so `1.0f` draws atlas pixels one to one. For a sheet packed at
@@ -185,15 +225,14 @@ of per animated thing, the way raylib's `Music` is played and updated:
 
 ```c
 typedef struct SpratAnimationPlayer {
-    SpratAnimation animation;   // Animation played (shares the sheet's frame array)
-    float time;                 // Seconds into the animation, from 0 to its duration (frameCount/fps)
+    SpratAnimation animation;   // Animation played (shares the sheet's frame array), with its flip and loop flags
+    float time;                 // Seconds into one pass of the animation, from 0 to its duration
     float speed;                // Playback rate: 1.0f plays at the animation's fps, negative plays in reverse
     bool playing;               // Advanced by UpdateSpratAnimation()
-    bool loop;                  // Wrap around at the end, otherwise stop on the last frame
 } SpratAnimationPlayer;
 ```
 
-`MakeSpratAnimationPlayer()` returns one already playing, looping, at speed
+`MakeSpratAnimationPlayer()` returns one already playing from its start, at speed
 `1.0f`; it allocates nothing, so copy it or drop it freely. Call
 `UpdateSpratAnimation(&player, GetFrameTime())` once per frame: time only moves
 while you update it, so pausing the game, slow motion or a fixed time step
@@ -202,40 +241,99 @@ keep the time, `PlaySpratAnimation()` restarts and `StopSpratAnimation()`
 rewinds without playing.
 
 A negative speed plays in reverse, and `PlaySpratAnimation()` then starts from
-the last frame. Set `loop` to `false` to play once: the player stops on the
-last frame it reaches (the first when reversed) and `IsSpratAnimationFinished()`
-becomes true. The fields are yours to read and set, `time` included.
+the last frame. The fields are yours to read and set, `time` included.
+
+The player plays the loop mode the sheet gave the animation (sprat-cli's
+`loop`, `once`, `pingpong` or `once-pingpong`), as `SpratLoopMode` flags in
+`animation.loop`:
+
+| `animation.loop` | Frames 0 1 2 play as |
+| --- | --- |
+| `0` | 0 1 2, 0 1 2, ... |
+| `SPRAT_LOOP_MODE_ONCE` | 0 1 2, stopping on 2 |
+| `SPRAT_LOOP_MODE_PINGPONG` | 0 1 2 1, 0 1 2 1, ... |
+| `SPRAT_LOOP_MODE_ONCE \| SPRAT_LOOP_MODE_PINGPONG` | 0 1 2 1 0, stopping on 0 |
+
+`time` covers one pass, so a ping-pong pass lasts `(2*frameCount - 2)/fps`
+(`(2*frameCount - 1)/fps` once). A `SPRAT_LOOP_MODE_ONCE` animation stops at the
+end of its pass (at its start when reversed) and `IsSpratAnimationFinished()`
+becomes true. To play an animation another way, change the player's copy:
+
+```c
+SpratAnimationPlayer attack = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "attack"));
+attack.animation.loop = SPRAT_LOOP_MODE_ONCE;
+```
 
 `GetSpratAnimationFrame()` gives the frame shown now, an index into
 `sheet.frames`, for its markers or a hitbox. `DrawSpratAnimation()` draws it with
-the animation's flip. To draw it with your own transform, combine that flip
-with yours:
+the animation's flip, `DrawSpratAnimationEx()` also rotated and scaled, and
+`DrawSpratAnimationPro()` with any scale and a flip combined with the
+animation's (flipping an animation already flipped on an axis undoes it).
+
+When the frame shown also places markers, keep a sprite and a player together.
+`SetSpratAnimation()` switches the animation played, restarting it and keeping
+the speed; for the one already played it does nothing, so set it every update.
+`UpdateSpratSpriteAnimation()` advances the player, then sets the sprite's frame
+and flip from it, leaving the rest alone: mirror the sprite with a negative scale.
 
 ```c
-int frame = GetSpratAnimationFrame(enemy.walk);
-DrawSpratFramePro(sheet, frame, enemy.position, (Vector2){ 2, 2 }, 0.0f,
-                  enemy.walk.animation.flip ^ enemy.flip, WHITE);
+typedef struct Enemy {
+    SpratSprite sprite;
+    SpratAnimationPlayer animation;
+    bool facingLeft;
+} Enemy;
+
+SetSpratAnimation(&enemy.animation, moving? walk : idle);
+UpdateSpratSpriteAnimation(&enemy.sprite, &enemy.animation, dt);
+enemy.sprite.scale.x = enemy.facingLeft? -1.0f : 1.0f;
+const SpratMarker *hitbox = GetSpratSpriteMarker(enemy.sprite, "hitbox");
+DrawSpratSprite(enemy.sprite, WHITE);
 ```
+
+An animation is the one played when its name, frames and frame count are, so
+`GetSpratAnimation()` can be called every update, and a copy with another loop
+mode, flip or fps, such as the player's own, doesn't restart it. For a pose such
+as idle, add an animation to the sheet, as the example does. After `StopSpratAnimation()` or `PlaySpratAnimation()`, a `deltaTime` of 0 only
+sets the sprite. `SetSpratSpriteAnimationFrame()` sets a sprite without advancing
+the player, for several sprites sharing one.
 
 ### Markers
 
-Markers (`pivot`, hitboxes, hands, spawn points...) are in original-image
-pixels. `GetSpratFramePoint()` takes the same transform as `DrawSpratFramePro()`
-and tells where a point of the original image lands on screen, for attaching
-items or placing collision shapes:
+Markers (`pivot`, hitboxes, hands, spawn points...) are points, circles,
+rectangles and polygons in original-image pixels. They mean something once
+placed with a sprite of their frame, and each frame has its own, so look them
+up again when the sprite's frame changes:
 
 ```c
-const SpratMarker *hand = GetSpratFrameMarker(sheet, frame, "hand");
-if (hand != NULL)
-{
-    Vector2 grip = GetSpratFramePoint(sheet, frame, hand->position, hero, scale, 0.0f, flip);
-    DrawSpratFramePro(sheet, sword, grip, scale, swordAngle, 0, WHITE);
-}
+// The sword is held by the hero's "hand" marker, mirrored with the hero
+sword.position = GetSpratMarkerCenter(hero, GetSpratSpriteMarker(hero, "hand"));
+
+// A coin is picked when the hero's hitbox touches the coin's
+if (CheckCollisionSpratMarkers(hero, GetSpratSpriteMarker(hero, "hitbox"),
+                               coin, GetSpratSpriteMarker(coin, "hitbox"))) ...
+
+if (debug) DrawSpratMarker(hero, GetSpratSpriteMarker(hero, "hitbox"), RED);
 ```
 
-A rectangle marker's `position` is its top-left corner; once mirrored, take
-both corners through `GetSpratFramePoint()` and order them, as the example's
-`DrawHitbox()` does.
+- `GetSpratMarkerCenter()` gives where a marker is: a point's point, a circle's
+  center, a rectangle's middle or a polygon's centroid (outside a concave
+  polygon whose middle is cut away). `GetSpratSpritePoint()` places any point
+  of the original image.
+- `CheckCollisionSpratMarkers()` compares the placed shapes exactly: a
+  rectangle turns with its sprite, a circle scaled unevenly is an ellipse, and
+  polygons may be concave. Touching counts, and so does a shape inside the
+  other. The sprites may come from different sheets, and a marker need not
+  belong to its sprite's frame: a program-made `SpratMarker` in the frame's
+  original-image pixels works too, such as an attack range.
+  `CheckCollisionPointSpratMarker()` tests a screen point, such as the mouse.
+- `GetSpratMarkerOutline()` fills a closed outline for `DrawLineStrip()` and,
+  like `snprintf()`, returns how many points it has (pass `NULL` and 0 to
+  count them). `DrawSpratMarker()` draws it, with a cross for a point.
+
+Markers are passed by pointer so that a lookup's `NULL`, for a frame without
+that marker, goes straight in: nothing collides with it,
+`GetSpratMarkerCenter()` returns the sprite's position and the outline is
+empty. None of them log, since they run every frame.
 
 ### Nine-slices
 
@@ -285,8 +383,10 @@ valid until `UnloadSpratSheet()`. `sheet.frames` is its start, so it is not
 
 [`examples/sprite_sheet.c`](examples/sprite_sheet.c) draws every frame of the
 example sheet (most of them stored turned in the atlas), plays the `run`,
-`run-left` and `spin` animations, resizes a nine-patch panel, and lets you run
-a hero holding a sword at its `hand` marker. `D` shows pivots and hitboxes.
+`run-left`, `spin` and `spin-pingpong` animations, resizes a nine-patch panel,
+and lets you run a hero holding a sword at its `hand` marker, picking up
+spinning coins its hitbox or the sword's `blade` touches. `D` shows pivots,
+hitboxes and the blade.
 
 The sheet in `examples/resources/` was packed with sprat-cli by
 `make_resources.sh`, from frames drawn by `make_sources.py`.
@@ -298,8 +398,6 @@ The sheet in `examples/resources/` was packed with sprat-cli by
 - Atlas paths are used as written, so a sheet from an untrusted source could
   name any file. Parse such a sheet with sprat-lib first and check each
   `atlases[i].path` with `sprat_path_is_safe()` before loading it here.
-- The sheet format has no loop setting yet: every player loops until you set
-  `loop` to `false`.
 
 ## License
 
