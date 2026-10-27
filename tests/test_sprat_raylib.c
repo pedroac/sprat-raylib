@@ -599,6 +599,116 @@ static void test_animation_player(void)
     CHECK(!IsSpratAnimationFinished(player));
 }
 
+/* Setting the animation played restarts only on a change, keeping the speed. */
+static void test_set_animation(void)
+{
+    SpratAnimationPlayer player = make_test_player(0, 3);
+    SpratAnimation walk = player.animation;
+    SpratAnimation idle = walk;
+    idle.name = "idle";
+    idle.frameCount = 1;
+
+    SetSpratAnimationSpeed(&player, 2.0f);
+    UpdateSpratAnimation(&player, 0.125f);
+    CHECK_INT(GetSpratAnimationFrame(player), 8);
+
+    SetSpratAnimation(&player, walk);               // the one played: nothing changes
+    CHECK_FLOAT(player.time, 0.25);
+    SpratAnimation once = walk;
+    once.loop = SPRAT_LOOP_MODE_ONCE;
+    once.flip = SPRAT_FLIP_VERTICAL;
+    SetSpratAnimation(&player, once);               // a copy played another way still is
+    CHECK_FLOAT(player.time, 0.25);
+    CHECK_INT(player.animation.loop, 0);
+
+    SetSpratAnimation(&player, idle);               // renamed: replaced, from its start
+    CHECK_STR(player.animation.name, "idle");
+    CHECK_FLOAT(player.time, 0);
+    CHECK_FLOAT(player.speed, 2);
+    CHECK(IsSpratAnimationPlaying(player));
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    SpratAnimation shorter = walk;
+    shorter.frameCount = 2;
+    SetSpratAnimation(&player, walk);
+    UpdateSpratAnimation(&player, 0.125f);
+    SetSpratAnimation(&player, shorter);            // other frame count: replaced
+    CHECK_INT(player.animation.frameCount, 2);
+    CHECK_FLOAT(player.time, 0);
+
+    StopSpratAnimation(&player);
+    SetSpratAnimation(&player, shorter);            // stopped stays stopped
+    CHECK(!IsSpratAnimationPlaying(player));
+    SetSpratAnimation(&player, walk);               // a new one plays
+    CHECK(IsSpratAnimationPlaying(player));
+
+    SetSpratAnimationSpeed(&player, -1.0f);
+    SetSpratAnimation(&player, idle);               // reversed: from its end
+    CHECK_FLOAT(player.time, 0.25);
+    CHECK_INT(GetSpratAnimationFrame(player), 7);
+
+    SetSpratAnimation(NULL, walk);                  // ignored
+}
+
+/* A sprite follows its player's frame and flip; the drawn animation sprite combines
+ * the given transform with them. */
+static void test_animation_sprite(void)
+{
+    SpratSheet sheet = { 0 };
+    SpratAnimationPlayer player = make_test_player(0, 3);
+    player.animation.flip = SPRAT_FLIP_HORIZONTAL;
+
+    SpratSprite sprite = MakeSpratSprite(sheet, 0, (Vector2){ 5, 6 });
+    sprite.scale = (Vector2){ -2, 3 };
+    sprite.rotation = 45.0f;
+    sprite.flip = SPRAT_FLIP_VERTICAL;
+    SetSpratSpriteAnimationFrame(&sprite, player);
+    CHECK_INT(sprite.frame, 7);
+    CHECK_INT(sprite.flip, SPRAT_FLIP_HORIZONTAL);  // replaced, not combined
+    CHECK_FLOAT(sprite.position.x, 5);              // the rest is the program's
+    CHECK_FLOAT(sprite.scale.x, -2);
+    CHECK_FLOAT(sprite.rotation, 45);
+
+    UpdateSpratAnimation(&player, 0.5f);
+    SetSpratSpriteAnimationFrame(&sprite, player);
+    CHECK_INT(sprite.frame, 9);
+    SetSpratSpriteAnimationFrame(&sprite, player);  // idempotent
+    CHECK_INT(sprite.frame, 9);
+    CHECK_INT(sprite.flip, SPRAT_FLIP_HORIZONTAL);
+
+    SetSpratSpriteAnimationFrame(NULL, player);     // ignored
+    SetSpratSpriteAnimationFrame(&sprite, make_test_player(0, 0));
+    CHECK_INT(sprite.frame, -1);                    // nothing shown: drawn as nothing
+
+    SpratSprite drawn = SpratMakeAnimationSprite(sheet, player, (Vector2){ 1, 2 }, (Vector2){ 3, 4 }, 30.0f,
+                                                 SPRAT_FLIP_HORIZONTAL | SPRAT_FLIP_VERTICAL);
+    CHECK_INT(drawn.frame, 9);
+    CHECK_INT(drawn.flip, SPRAT_FLIP_VERTICAL);     // the animation's horizontal flip undone
+    CHECK_FLOAT(drawn.position.x, 1);
+    CHECK_FLOAT(drawn.position.y, 2);
+    CHECK_FLOAT(drawn.scale.x, 3);
+    CHECK_FLOAT(drawn.scale.y, 4);
+    CHECK_FLOAT(drawn.rotation, 30);
+
+    drawn = SpratMakeAnimationSprite(sheet, player, (Vector2){ 1, 2 }, (Vector2){ 1, 1 }, 0.0f, 0);
+    CHECK_INT(drawn.flip, SPRAT_FLIP_HORIZONTAL);   // DrawSpratAnimation(): the animation's flip
+
+    UpdateSpratSpriteAnimation(&sprite, &player, 0.25f);    // advanced, then set: wraps to 7
+    CHECK_INT(sprite.frame, 7);
+    CHECK_FLOAT(player.time, 0);
+    sprite.flip = 0;
+    StopSpratAnimation(&player);
+    UpdateSpratAnimation(&player, 0.25f);
+    UpdateSpratSpriteAnimation(&sprite, &player, 0.0f);     // only sets the sprite
+    CHECK_INT(sprite.frame, 7);
+    CHECK_INT(sprite.flip, SPRAT_FLIP_HORIZONTAL);
+    ResumeSpratAnimation(&player);
+    UpdateSpratSpriteAnimation(NULL, &player, 0.25f);       // no sprite: the player still advances
+    CHECK_FLOAT(player.time, 0.25);
+    UpdateSpratSpriteAnimation(&sprite, NULL, 0.25f);       // ignored
+    CHECK_INT(sprite.frame, 7);
+}
+
 static void test_animation_pingpong(void)
 {
     // Repeating: 7 8 9 8, then 7 again; one pass lasts 1 s
@@ -1662,6 +1772,8 @@ int main(void)
     test_lookups();
     test_animation_player();
     test_animation_pingpong();
+    test_set_animation();
+    test_animation_sprite();
     test_draw_matches_original();
     test_sprite_point_matches_draw();
     test_markers_collide();

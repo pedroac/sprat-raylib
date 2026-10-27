@@ -48,7 +48,6 @@ int main(void)
     // Look names up once, then draw by index, and play animations with a player each
     SpratAnimationPlayer run = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "run"));
     SpratAnimationPlayer runLeft = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "run-left"));
-    SpratAnimationPlayer heroRun = run;
     const float spinSpeeds[3] = { 1.0f, 0.5f, -1.0f };     // normal, half speed, reversed
     SpratAnimationPlayer spins[3] = { 0 };
     for (int i = 0; i < 3; i++)
@@ -58,13 +57,19 @@ int main(void)
     }
     SpratAnimationPlayer coinSpin = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "spin"));
     SpratAnimationPlayer coinPingPong = MakeSpratAnimationPlayer(GetSpratAnimation(sheet, "spin-pingpong"));
-    int idle = GetSpratFrameIndex(sheet, "hero/run_01.png");
     int panel = GetSpratFrameIndex(sheet, "panel");
 
     // Sprites are where frames are: drawn there, and their markers placed there
     const float groundY = 380.0f;
-    SpratSprite hero = MakeSpratSprite(sheet, idle, (Vector2){ screenWidth/2.0f, groundY });
-    hero.scale = (Vector2){ HERO_SCALE, HERO_SCALE };
+    // The hero keeps a sprite and a player together, switching between its idle and run
+    // animations: the idle one is the run's first frame, renamed so it is another animation
+    SpratAnimation heroRun = run.animation;
+    SpratAnimation heroIdle = heroRun;
+    heroIdle.name = "idle";
+    heroIdle.frameCount = 1;
+    SpratSprite hero = MakeSpratSprite(sheet, -1, (Vector2){ screenWidth/2.0f, groundY });
+    SpratAnimationPlayer heroAnimation = MakeSpratAnimationPlayer(heroIdle);
+    bool facingLeft = false;
     SpratSprite sword = MakeSpratSprite(sheet, GetSpratFrameIndex(sheet, "sword"), hero.position);
     sword.scale = (Vector2){ SWORD_SCALE, SWORD_SCALE };
 
@@ -93,13 +98,10 @@ int main(void)
         float dt = GetFrameTime();
         bool running = false;
 
-        if (IsKeyDown(KEY_RIGHT)) { hero.position.x += HERO_SPEED*dt; hero.flip = 0; running = true; }
-        if (IsKeyDown(KEY_LEFT)) { hero.position.x -= HERO_SPEED*dt; hero.flip = SPRAT_FLIP_HORIZONTAL; running = true; }
+        if (IsKeyDown(KEY_RIGHT)) { hero.position.x += HERO_SPEED*dt; facingLeft = false; running = true; }
+        if (IsKeyDown(KEY_LEFT)) { hero.position.x -= HERO_SPEED*dt; facingLeft = true; running = true; }
         if (hero.position.x < 0.0f) hero.position.x = 0.0f;
         if (hero.position.x > screenWidth) hero.position.x = (float)screenWidth;
-
-        if (running) UpdateSpratAnimation(&heroRun, dt);
-        else StopSpratAnimation(&heroRun);
 
         UpdateSpratAnimation(&run, dt);
         UpdateSpratAnimation(&runLeft, dt);
@@ -121,13 +123,16 @@ int main(void)
 
         if (IsKeyPressed(KEY_D)) debug = !debug;
 
-        // The run animation's first frame doubles as the idle pose
-        hero.frame = running? GetSpratAnimationFrame(heroRun) : idle;
+        // Setting the animation every update restarts it only when it changes. The player sets
+        // the hero's frame and flip; facing left mirrors with the scale, which it leaves alone
+        SetSpratAnimation(&heroAnimation, running? heroRun : heroIdle);
+        UpdateSpratSpriteAnimation(&hero, &heroAnimation, dt);
+        hero.scale = (Vector2){ facingLeft? -HERO_SCALE : HERO_SCALE, HERO_SCALE };
 
         // The sword is held by the hero's "hand" marker, mirrored with the hero
         sword.position = GetSpratMarkerCenter(hero, GetSpratSpriteMarker(hero, "hand"));
         sword.rotation = 60.0f - ((swingTime > 0.0f)? 150.0f*(1.0f - swingTime/SWING_TIME) : 0.0f);
-        if (hero.flip) sword.rotation = -sword.rotation;
+        if (facingLeft) sword.rotation = -sword.rotation;
 
         // A coin is picked when the hero's hitbox collides with the coin's, or the sword's blade
         // does while it swings
@@ -137,7 +142,7 @@ int main(void)
         const SpratMarker *coinHitbox = GetSpratFrameMarker(sheet, coinFrame, "hitbox");    // The coins spin together
         for (int i = 0; i < COIN_COUNT; i++)
         {
-            coins[i].frame = coinFrame;
+            SetSpratSpriteAnimationFrame(&coins[i], coinSpin);
             if (coinAway[i] > 0.0f) { coinAway[i] -= dt; continue; }
 
             if (CheckCollisionSpratMarkers(hero, heroHitbox, coins[i], coinHitbox) ||
@@ -197,9 +202,9 @@ int main(void)
             DrawText(TextFormat("coins picked: %i", coinsPicked), 20, 390, 20, GRAY);
 
             // Controlled hero, with the sword drawn behind when facing left
-            if (hero.flip) DrawSpratSprite(sword, WHITE);
+            if (facingLeft) DrawSpratSprite(sword, WHITE);
             DrawSpratSprite(hero, WHITE);
-            if (!hero.flip) DrawSpratSprite(sword, WHITE);
+            if (!facingLeft) DrawSpratSprite(sword, WHITE);
 
             if (debug)
             {

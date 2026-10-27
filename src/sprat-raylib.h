@@ -1,6 +1,6 @@
 /**********************************************************************************************
 *
-*   sprat-raylib v0.4.0 - Load and draw sprat-cli sprite sheets with raylib
+*   sprat-raylib v0.5.0 - Load and draw sprat-cli sprite sheets with raylib
 *
 *   DESCRIPTION:
 *       Loads the metadata written by `spratconvert --transform raw` (through sprat-lib)
@@ -22,7 +22,10 @@
 *       A SpratSprite is a frame placed on the screen: drawn there, and its markers placed
 *       there, so what is drawn and what collides always agree.
 *
-*           SpratSprite hero = MakeSpratSprite(sheet, GetSpratAnimationFrame(run), position);
+*           SpratSprite hero = MakeSpratSprite(sheet, -1, position);
+*           ...
+*           SetSpratAnimation(&run, running? runAnimation : idleAnimation);  // restarts only on a change
+*           UpdateSpratSpriteAnimation(&hero, &run, GetFrameTime());         // sets hero's frame and flip
 *           const SpratMarker *hitbox = GetSpratSpriteMarker(hero, "hitbox");
 *           if (CheckCollisionSpratMarkers(hero, hitbox, coin, coinHitbox)) ...
 *           DrawSpratSprite(hero, WHITE);
@@ -57,7 +60,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.4.0"
+#define SPRAT_RAYLIB_VERSION    "0.5.0"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)
@@ -219,6 +222,7 @@ SPRATAPI bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, 
 SPRATAPI SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name); // Get animation by name, zeroed if not found
 SPRATAPI bool IsSpratAnimationValid(SpratAnimation animation);                 // Check if an animation is valid (found in a sheet; it may have no frames)
 SPRATAPI SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation); // Make a player for an animation: playing from its start, at speed 1.0f
+SPRATAPI void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation); // Set the animation played: restart with it, keeping the speed, unless it is the one played
 SPRATAPI void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime); // Advance a playing animation by deltaTime seconds, scaled by its speed
 SPRATAPI void PlaySpratAnimation(SpratAnimationPlayer *player);                // Play an animation from its start (its end when the speed is negative)
 SPRATAPI void StopSpratAnimation(SpratAnimationPlayer *player);                // Stop an animation and rewind it to where PlaySpratAnimation() starts
@@ -228,7 +232,11 @@ SPRATAPI void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed);
 SPRATAPI bool IsSpratAnimationPlaying(SpratAnimationPlayer player);            // Check if an animation is playing
 SPRATAPI bool IsSpratAnimationFinished(SpratAnimationPlayer player);           // Check if a SPRAT_LOOP_MODE_ONCE animation reached its end in the direction it plays
 SPRATAPI int GetSpratAnimationFrame(SpratAnimationPlayer player);              // Get frame index shown now (an index into sheet.frames), -1 if none
-SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint); // Draw the frame shown now, with the animation's flip (use a SpratSprite to scale or rotate it)
+SPRATAPI void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player); // Set a sprite's frame to the one shown now, and its flip to the animation's
+SPRATAPI void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime); // Advance an animation by deltaTime seconds, then set the sprite's frame and flip from it
+SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint); // Draw the frame shown now, with the animation's flip
+SPRATAPI void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint); // Draw the frame shown now, with the animation's flip, rotation and scale around its pivot
+SPRATAPI void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint); // Draw the frame shown now, scaled, flipped (flip combined with the animation's) and rotated around its pivot
 
 #if defined(__cplusplus)
 }
@@ -316,6 +324,7 @@ static bool SpratJoinPath(char *buffer, int bufferSize, const char *dir, const c
 static bool SpratIsFrameDrawable(SpratSheet sheet, int frame);
 static double SpratGetAnimationStepCount(SpratAnimation animation);
 static float SpratGetAnimationDuration(SpratAnimation animation);
+static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip);
 static SpratPlacement SpratGetPlacement(Vector2 pivot, Vector2 position, Vector2 scale, float rotation, int flip);
 static SpratPoint SpratPlacePoint(const SpratPlacement *placement, double x, double y);
 static bool SpratGetSpritePlacement(SpratSprite sprite, SpratPlacement *placement);
@@ -772,6 +781,21 @@ SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation)
     return player;
 }
 
+// Set the animation played: restart with it, keeping the speed, unless it is the one played
+// NOTE: The one played is left as it is, stopped or finished included, so it can be set every
+// update. It is the one played when its name, frames and frame count are, so a copy with
+// another flip, loop mode or fps still is; an alias, or a copy renamed, is not
+void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation)
+{
+    if (player == NULL) return;
+
+    const SpratAnimation *played = &player->animation;
+    if ((played->name == animation.name) && (played->frames == animation.frames) && (played->frameCount == animation.frameCount)) return;
+
+    player->animation = animation;
+    PlaySpratAnimation(player);
+}
+
 // Advance a playing animation by deltaTime seconds, scaled by its speed
 // NOTE: A repeating animation's time wraps around, so it stays precise however long it plays.
 // A SPRAT_LOOP_MODE_ONCE one stops at its end, or at its start when playing in reverse
@@ -883,14 +907,44 @@ int GetSpratAnimationFrame(SpratAnimationPlayer player)
     return anim->frames[(int)step];
 }
 
+// Set a sprite's frame to the one shown now, and its flip to the animation's
+// NOTE: The sprite's flip is replaced: mirror an animated sprite with a negative scale instead.
+// UpdateSpratSpriteAnimation() calls it every update
+void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player)
+{
+    if (sprite == NULL) return;
+
+    sprite->frame = GetSpratAnimationFrame(player);
+    sprite->flip = player.animation.flip;
+}
+
+// Advance an animation by deltaTime seconds, then set the sprite's frame and flip from it
+// NOTE: A deltaTime of 0 only sets the sprite, such as after StopSpratAnimation()
+void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime)
+{
+    if (player == NULL) return;
+
+    UpdateSpratAnimation(player, deltaTime);
+    SetSpratSpriteAnimationFrame(sprite, *player);
+}
+
 // Draw the frame shown now, with the animation's flip
 void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint)
 {
-    SpratSprite sprite = MakeSpratSprite(sheet, GetSpratAnimationFrame(player), position);
+    DrawSpratAnimationPro(sheet, player, position, (Vector2){ 1.0f, 1.0f }, 0.0f, 0, tint);
+}
 
-    sprite.flip = player.animation.flip;
+// Draw the frame shown now, with the animation's flip, rotation and scale around its pivot
+void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint)
+{
+    DrawSpratAnimationPro(sheet, player, position, (Vector2){ scale, scale }, rotation, 0, tint);
+}
 
-    DrawSpratSprite(sprite, tint);
+// Draw the frame shown now, scaled, flipped (flip combined with the animation's) and rotated around its pivot
+// NOTE: Flipping an animation that is already flipped on an axis draws it unflipped on that axis
+void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint)
+{
+    DrawSpratSprite(SpratMakeAnimationSprite(sheet, player, position, scale, rotation, flip), tint);
 }
 
 //----------------------------------------------------------------------------------
@@ -1193,6 +1247,19 @@ static float SpratGetAnimationDuration(SpratAnimation animation)
     if (stepCount <= 0.0) return 0.0f;
 
     return (float)(stepCount/animation.fps);
+}
+
+// Make the sprite DrawSpratAnimationPro() draws: the frame shown now, flipped by flip and the animation's flip
+static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip)
+{
+    SpratSprite sprite = MakeSpratSprite(sheet, -1, position);
+
+    SetSpratSpriteAnimationFrame(&sprite, player);
+    sprite.scale = scale;
+    sprite.rotation = rotation;
+    sprite.flip ^= flip;
+
+    return sprite;
 }
 
 // Get the cosine and sine of a clockwise angle in degrees

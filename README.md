@@ -121,6 +121,7 @@ bool CheckCollisionPointSpratMarker(Vector2 point, SpratSprite sprite, const Spr
 SpratAnimation GetSpratAnimation(SpratSheet sheet, const char *name);
 bool IsSpratAnimationValid(SpratAnimation animation);
 SpratAnimationPlayer MakeSpratAnimationPlayer(SpratAnimation animation);
+void SetSpratAnimation(SpratAnimationPlayer *player, SpratAnimation animation);
 void UpdateSpratAnimation(SpratAnimationPlayer *player, float deltaTime);
 void PlaySpratAnimation(SpratAnimationPlayer *player);
 void StopSpratAnimation(SpratAnimationPlayer *player);
@@ -130,7 +131,11 @@ void SetSpratAnimationSpeed(SpratAnimationPlayer *player, float speed);
 bool IsSpratAnimationPlaying(SpratAnimationPlayer player);
 bool IsSpratAnimationFinished(SpratAnimationPlayer player);
 int GetSpratAnimationFrame(SpratAnimationPlayer player);
+void SetSpratSpriteAnimationFrame(SpratSprite *sprite, SpratAnimationPlayer player);
+void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *player, float deltaTime);
 void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint);
+void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint);
+void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
 ```
 
 ### The sheet
@@ -184,8 +189,8 @@ expect. For anything more, place the frame with a sprite.
 ### Sprites
 
 A `SpratSprite` is a frame placed on the screen. It is a plain struct the
-program owns and changes directly, such as `frame` from
-`GetSpratAnimationFrame()` every update:
+program owns and changes directly; `UpdateSpratSpriteAnimation()` sets its
+`frame` and `flip` from an animation player every update:
 
 ```c
 typedef struct SpratSprite {
@@ -261,14 +266,36 @@ attack.animation.loop = SPRAT_LOOP_MODE_ONCE;
 
 `GetSpratAnimationFrame()` gives the frame shown now, an index into
 `sheet.frames`, for its markers or a hitbox. `DrawSpratAnimation()` draws it with
-the animation's flip. To draw it with your own transform, put it in a sprite
-and combine that flip with yours:
+the animation's flip, `DrawSpratAnimationEx()` also rotated and scaled, and
+`DrawSpratAnimationPro()` with any scale and a flip combined with the
+animation's (flipping an animation already flipped on an axis undoes it).
+
+When the frame shown also places markers, keep a sprite and a player together.
+`SetSpratAnimation()` switches the animation played, restarting it and keeping
+the speed; for the one already played it does nothing, so set it every update.
+`UpdateSpratSpriteAnimation()` advances the player, then sets the sprite's frame
+and flip from it, leaving the rest alone: mirror the sprite with a negative scale.
 
 ```c
-enemy.sprite.frame = GetSpratAnimationFrame(enemy.walk);
-enemy.sprite.flip = enemy.walk.animation.flip ^ enemy.facing;
+typedef struct Enemy {
+    SpratSprite sprite;
+    SpratAnimationPlayer animation;
+    bool facingLeft;
+} Enemy;
+
+SetSpratAnimation(&enemy.animation, moving? walk : idle);
+UpdateSpratSpriteAnimation(&enemy.sprite, &enemy.animation, dt);
+enemy.sprite.scale.x = enemy.facingLeft? -1.0f : 1.0f;
+const SpratMarker *hitbox = GetSpratSpriteMarker(enemy.sprite, "hitbox");
 DrawSpratSprite(enemy.sprite, WHITE);
 ```
+
+An animation is the one played when its name, frames and frame count are, so a
+copy with another loop mode, flip or fps doesn't restart it. To show part of an
+animation as another one, rename the copy, as the example does for its idle pose.
+After `StopSpratAnimation()` or `PlaySpratAnimation()`, a `deltaTime` of 0 only
+sets the sprite. `SetSpratSpriteAnimationFrame()` sets a sprite without advancing
+the player, for several sprites sharing one.
 
 ### Markers
 
