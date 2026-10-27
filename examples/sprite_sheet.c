@@ -61,12 +61,9 @@ int main(void)
 
     // Sprites are where frames are: drawn there, and their markers placed there
     const float groundY = 380.0f;
-    // The hero keeps a sprite and a player together, switching between its idle and run
-    // animations: the idle one is the run's first frame, renamed so it is another animation
+    // The hero keeps a sprite and a player together, switching between its idle and run animations
     SpratAnimation heroRun = run.animation;
-    SpratAnimation heroIdle = heroRun;
-    heroIdle.name = "idle";
-    heroIdle.frameCount = 1;
+    SpratAnimation heroIdle = GetSpratAnimation(sheet, "idle");
     SpratSprite hero = MakeSpratSprite(sheet, -1, (Vector2){ screenWidth/2.0f, groundY });
     SpratAnimationPlayer heroAnimation = MakeSpratAnimationPlayer(heroIdle);
     bool facingLeft = false;

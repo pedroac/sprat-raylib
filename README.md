@@ -290,10 +290,10 @@ const SpratMarker *hitbox = GetSpratSpriteMarker(enemy.sprite, "hitbox");
 DrawSpratSprite(enemy.sprite, WHITE);
 ```
 
-An animation is the one played when its name, frames and frame count are, so a
-copy with another loop mode, flip or fps doesn't restart it. To show part of an
-animation as another one, rename the copy, as the example does for its idle pose.
-After `StopSpratAnimation()` or `PlaySpratAnimation()`, a `deltaTime` of 0 only
+An animation is the one played when its name, frames and frame count are, so
+`GetSpratAnimation()` can be called every update, and a copy with another loop
+mode, flip or fps, such as the player's own, doesn't restart it. For a pose such
+as idle, add an animation to the sheet, as the example does. After `StopSpratAnimation()` or `PlaySpratAnimation()`, a `deltaTime` of 0 only
 sets the sprite. `SetSpratSpriteAnimationFrame()` sets a sprite without advancing
 the player, for several sprites sharing one.
 

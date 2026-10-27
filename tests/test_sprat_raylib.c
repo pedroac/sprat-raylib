@@ -79,7 +79,7 @@ static void test_convert_example(void)
     CHECK(sheet.frames != NULL);
     CHECK_INT(sheet.atlasCount, 1);
     CHECK_INT(sheet.frameCount, 16);
-    CHECK_INT(sheet.animationCount, 4);
+    CHECK_INT(sheet.animationCount, 5);
     CHECK_FLOAT(sheet.scale, 1.0);
     CHECK_INT(sheet.atlases[0].id, 0);   // textures are loaded separately
 
@@ -135,6 +135,10 @@ static void test_convert_example(void)
     CHECK_INT(left.frames[5], run.frames[5]);
     CHECK_INT(left.flip, SPRAT_FLIP_HORIZONTAL);
     CHECK_INT(run.loop, 0);
+
+    SpratAnimation idle = GetSpratAnimation(sheet, "idle");     // the run's first frame
+    CHECK_INT(idle.frameCount, 1);
+    CHECK_INT(idle.frames[0], run01);
 
     SpratAnimation pingpong = GetSpratAnimation(sheet, "spin-pingpong");
     CHECK_INT(pingpong.loop, SPRAT_LOOP_MODE_PINGPONG);
