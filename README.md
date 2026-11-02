@@ -393,8 +393,6 @@ The sheet in `examples/resources/` was packed with sprat-cli by
 
 ## Limitations
 
-- Normal and collision maps are not loaded. sprat-lib gives their paths if
-  you need them.
 - Atlas paths are used as written, so a sheet from an untrusted source could
   name any file. Parse such a sheet with sprat-lib first and check each
   `atlases[i].path` with `sprat_path_is_safe()` before loading it here.
