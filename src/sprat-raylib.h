@@ -42,7 +42,7 @@
 *
 *   DEPENDENCIES:
 *       raylib 5.5 or newer     - Textures, drawing, file loading and logging
-*       sprat-lib 0.7 or newer  - Parsing and validating the .sprat file (implementation only)
+*       sprat-lib 0.9 or newer  - Parsing and validating the .sprat file (implementation only)
 *
 *   COORDINATES:
 *       Frame geometry (pivot, content, size, slice, markers) is in original-image pixels,
@@ -60,7 +60,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.5.0"
+#define SPRAT_RAYLIB_VERSION    "0.6.0"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)

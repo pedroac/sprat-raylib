@@ -52,7 +52,7 @@ int main(void)
 
 `src/sprat-raylib.h` is the whole library. Define `SPRAT_RAYLIB_IMPLEMENTATION` in
 exactly one C file before including it, and link raylib (5.5 or newer) and
-sprat-lib (0.7 or newer):
+sprat-lib (0.9 or newer):
 
 ```sh
 cc game.c -Isrc -I../sprat-lib/include ../sprat-lib/src/*.c -lraylib -lm
