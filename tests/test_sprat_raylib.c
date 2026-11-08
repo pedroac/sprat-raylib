@@ -1763,12 +1763,39 @@ static void test_npatch_matches_original(void)
     CHECK_INT(SpratGetNPatchDrawCalls(&frame, (Rectangle){ 0, 0, 0, 10 }, calls), 0);
 }
 
+/* Sheets from today's spratconvert (sprat-raw 10) carry puppets, which sprat-raylib
+ * doesn't play yet: they still load, with their frames and animations. */
+static void test_convert_current_format(void)
+{
+    SpratSheet sheet = convert_text(
+        "sprat-raw 10\n"
+        "sheet 1 0 0 1 1 1 1 0 0 0 1 1 1 0 1 1 1 1 1 15\n"
+        "atlas 16 16 0:\n"
+        "sprite 0 0 0 4 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 0 1:s 5:s.png\n"
+        "anim 8 0 0 -1 1 0 3:run\n"
+        "puppet 1 0 1 1 1:p\n"
+        "part -1 1 0 0 1 1:a\n"
+        "variant 0 0 1:s\n"
+        "pose 1 1:q\n"
+        "set 0 -1 1 30 0 0 0 0 0 0 1 2 0.5 1 0.5 1 255 0 0\n"
+        "sequence 8 0 1 2:go\n"
+        "step 0 2 1 0 1 0 1\n");
+
+    CHECK_INT(sheet.frameCount, 1);
+    CHECK_INT(GetSpratFrameIndex(sheet, "s"), 0);
+    SpratAnimation run = GetSpratAnimation(sheet, "run");
+    CHECK_INT(run.frameCount, 1);
+    CHECK_INT(run.frames[0], 0);
+    UnloadSpratSheet(sheet);
+}
+
 int main(void)
 {
     SetTraceLogLevel(LOG_NONE);
 
     test_convert_example();
     test_convert_polygon_and_empty();
+    test_convert_current_format();
     test_alias_frames_are_shared();
     test_convert_loops();
     test_add_size_overflow();
