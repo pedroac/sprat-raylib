@@ -52,7 +52,7 @@ int main(void)
 
 `src/sprat-raylib.h` is the whole library. Define `SPRAT_RAYLIB_IMPLEMENTATION` in
 exactly one C file before including it, and link raylib (5.5 or newer) and
-sprat-lib (0.14 or newer, which reads the sheets sprat-cli writes today):
+sprat-lib (0.15 or newer, which reads the sheets sprat-cli writes today and plays puppets):
 
 ```sh
 cc game.c -Isrc -I../sprat-lib/include ../sprat-lib/src/*.c -lraylib -lm
@@ -136,6 +136,23 @@ void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlayer *playe
 void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint);
 void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint);
 void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint);
+
+// Puppet functions
+SpratPuppet LoadSpratPuppet(SpratSheet sheet, const char *name);
+bool IsSpratPuppetValid(SpratPuppet puppet);
+void UnloadSpratPuppet(SpratPuppet puppet);
+int GetSpratPuppetPartIndex(SpratPuppet puppet, const char *name);
+int GetSpratPuppetPoseIndex(SpratPuppet puppet, const char *name);
+int GetSpratPuppetSequenceIndex(SpratPuppet puppet, const char *name);
+void ResetSpratPuppetPose(SpratPuppet puppet);
+void ApplySpratPuppetPose(SpratPuppet puppet, int pose);
+void ApplySpratPuppetSequence(SpratPuppet puppet, int sequence, float time);
+float GetSpratPuppetSequenceDuration(SpratPuppet puppet, int sequence);
+bool IsSpratPuppetSequenceFinished(SpratPuppet puppet, int sequence, float time);
+void UpdateSpratPuppet(SpratPuppet *puppet, float deltaTime);
+SpratSprite GetSpratPuppetPartSprite(SpratPuppet puppet, int part);
+Color GetSpratPuppetPartTint(SpratPuppet puppet, int part, Color tint);
+void DrawSpratPuppet(SpratPuppet puppet, Color tint);
 ```
 
 ### The sheet
@@ -297,6 +314,54 @@ as idle, add an animation to the sheet, as the example does. After `StopSpratAni
 sets the sprite. `SetSpratSpriteAnimationFrame()` sets a sprite without advancing
 the player, for several sprites sharing one.
 
+### Puppets
+
+A puppet is a cutout rig from sprat-cli's `--puppets` file: parts joined by
+their markers, each showing one of its variants (a sprite or an animation),
+posed by poses and animated by sequences of them. sprat-raylib plays and draws
+them exactly as sprat-gui's Puppet workspace previews them, through
+sprat-lib's player.
+
+Load one `SpratPuppet` per puppet on screen. Every update, reset its pose, apply
+the sequences and poses it plays (later ones win where they set the same part),
+then draw it:
+
+```c
+SpratPuppet kid = LoadSpratPuppet(sheet, "kid");
+int walk = GetSpratPuppetSequenceIndex(kid, "walk");
+int talk = GetSpratPuppetSequenceIndex(kid, "talk");
+int smile = GetSpratPuppetPoseIndex(kid, "smile");
+...
+UpdateSpratPuppet(&kid, dt);               // the animations its parts show
+kid.position = (Vector2){ x, groundY };    // where its pivot goes
+kid.flip = facingLeft? SPRAT_FLIP_HORIZONTAL : 0;
+ResetSpratPuppetPose(kid);
+ApplySpratPuppetSequence(kid, walk, walkTime);     // seconds since the walk started
+ApplySpratPuppetSequence(kid, talk, talkTime);
+if (happy) ApplySpratPuppetPose(kid, smile);
+DrawSpratPuppet(kid, WHITE);
+...
+UnloadSpratPuppet(kid);
+```
+
+A sequence plays whole frames at its fps: frame `k` of a step's `in` moves the
+values its pose sets `(k + 1)/in` of the way (parts that ease by step wait for the
+last `in` frame), variants switch when the pose arrives, then the step holds.
+Ping-pong plays the steps back again, a loop starts each cycle where the last
+ended, and once holds its last frame (`IsSpratPuppetSequenceFinished()`).
+`kid.time` clocks the animations its parts show, each at its own fps.
+
+`position`, `scale`, `rotation` and `flip` place the whole puppet, as they place
+a `SpratSprite`. Parts are scaled, faded and tinted by their pose, and a part
+hanging by a marker its frame lacks isn't drawn, nor is what hangs from it.
+`GetSpratPuppetPartSprite()` gives a part as the `SpratSprite` it is drawn as, so
+its markers and collisions work as any sprite's:
+
+```c
+SpratSprite hand = GetSpratPuppetPartSprite(kid, GetSpratPuppetPartIndex(kid, "hand"));
+if (CheckCollisionSpratMarkers(hand, GetSpratSpriteMarker(hand, "grab"), coin, coinHitbox)) ...
+```
+
 ### Markers
 
 Markers (`pivot`, hitboxes, hands, spawn points...) are points, circles,
@@ -374,7 +439,10 @@ assign another texture, and `UnloadSpratSheet()` will unload that one.
 ### Memory
 
 The metadata is copied into one allocation (with `RL_CALLOC`, released with
-`RL_FREE`), and sprat-lib's parsed sheet is freed before the loader returns.
+`RL_FREE`), and sprat-lib's parsed sheet is freed before the loader returns,
+unless the sheet has puppets: sprat-lib plays them from its own model, which
+`sheet.puppetData` keeps until `UnloadSpratSheet()`. Each `LoadSpratPuppet()`
+makes one more allocation, for its parts' pose, released by `UnloadSpratPuppet()`.
 Every array and string of a `SpratSheet` points into that allocation and stays
 valid until `UnloadSpratSheet()`. `sheet.frames` is its start, so it is not
 `NULL` after a successful load even when the sheet has no frames.

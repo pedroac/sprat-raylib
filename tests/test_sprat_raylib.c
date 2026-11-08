@@ -1789,6 +1789,196 @@ static void test_convert_current_format(void)
     UnloadSpratSheet(sheet);
 }
 
+/* ---- Puppets ------------------------------------------------------------- */
+
+/* A sheet with its puppets, as LoadSpratSheet() keeps them, without textures. */
+static SpratSheet convert_puppets(const char *text)
+{
+    sprat_sheet *raw = NULL;
+    sprat_error error;
+    SpratSheet sheet = { 0 };
+
+    if (sprat_sheet_load_memory(text, strlen(text), &raw, &error) != SPRAT_OK)
+    {
+        fprintf(stderr, "load failed: %s\n", error.message);
+        failures++;
+        return sheet;
+    }
+    sheet = SpratConvertSheet(raw);
+    if (!SpratKeepPuppets(&sheet, raw)) sprat_sheet_free(raw);
+    return sheet;
+}
+
+/* Sprites: body (pivot 4,8, a "neck" at 4,0 and a "hand" at 8,4), head (pivot and "base"
+ * at 2,4), arm (a "base" at 0,1) and head-2 (a "base" at 2,3); blink plays head and head-2
+ * at 8 fps, and back is blink mirrored. The body stands at 10,20; the arm, drawn first,
+ * hangs from its hand and the head from its neck. "wave" raises the arm, moves, stretches,
+ * fades and reddens the body, and shows the head's back moved 2 right; "go" waves over 4
+ * frames at 10 fps and holds 2. In "q", b hangs by a marker its sprite lacks, and c from b. */
+static const char *puppetSheet =
+    "sprat-raw 10\n"
+    "sheet 1 0 0 1 4 2 2 0 5 0 2 6 7 4 1 3 1 1 0 151\n"
+    "atlas 8 8 0:\n"
+    "sprite 0 0 0 8 8 0 0 0 0 0 1 4 8 0 0 0 0 0 0 0 -1 2 4:body 8:body.png\n"
+    "marker 0 4 0 0 0 0 0 4:neck\n"
+    "marker 0 8 4 0 0 0 0 4:hand\n"
+    "sprite 0 0 0 4 4 0 0 0 0 0 1 2 4 0 0 0 0 0 0 0 -1 1 4:head 8:head.png\n"
+    "marker 0 2 4 0 0 0 0 4:base\n"
+    "sprite 0 4 0 4 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 1 3:arm 7:arm.png\n"
+    "marker 0 0 1 0 0 0 0 4:base\n"
+    "sprite 0 0 4 4 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 1 6:head-2 10:head-2.png\n"
+    "marker 0 2 3 0 0 0 0 4:base\n"
+    "anim 8 0 0 -1 2 1 3 5:blink\n"
+    "anim 8 1 0 0 0 4:back\n"
+    "puppet 3 2 1 1 1:p\n"
+    "part 1 0 0 0 1 3:arm\nvariant 0 2 3:arm\n"
+    "part -1 1 10 20 1 4:body\nvariant 0 0 4:body\n"
+    "part 1 0 0 0 2 4:head\nvariant 0 1 4:head\nvariant 1 1 4:back\n"
+    "joint 0 1 0 0 0 0 0 4:base 4:hand\n"
+    "joint 2 1 0 0 0 0 0 4:base 4:neck\n"
+    "pose 3 4:wave\n"
+    "set 0 -1 1 90 0 0 0 0 0 0 0 1 1 0 1 0 255 255 255\n"
+    "set 1 -1 0 0 0 0 0 1 30 20 1 2 1 1 0.5 1 255 0 0\n"
+    "set 2 1 0 0 1 2 0 0 0 0 0 1 1 0 1 0 255 255 255\n"
+    "sequence 10 0 1 2:go\nstep 0 4 2 0 0\n"
+    "puppet 3 2 0 0 1:q\n"
+    "part -1 1 0 0 1 1:a\nvariant 0 0 1:a\n"
+    "part 0 0 0 0 1 1:b\nvariant 0 2 1:b\n"
+    "part 1 0 0 0 1 1:c\nvariant 0 1 1:c\n"
+    "joint 1 0 0 0 0 0 0 4:nope 4:hand\n"
+    "joint 2 1 0 0 0 0 0 4:base 4:base\n";
+
+enum { ARM, BODY, HEAD };
+
+static void test_puppet_lookups(void)
+{
+    SpratSheet sheet = convert_puppets(puppetSheet);
+    CHECK_INT(sheet.puppetCount, 2);
+    CHECK(sheet.puppetData != NULL);
+
+    SpratPuppet puppet = LoadSpratPuppet(sheet, "p");
+    CHECK(IsSpratPuppetValid(puppet));
+    CHECK_STR(puppet.name, "p");
+    CHECK_INT(puppet.partCount, 3);
+    CHECK_FLOAT(puppet.scale, 1);
+    CHECK_INT(GetSpratPuppetPartIndex(puppet, "head"), HEAD);
+    CHECK_INT(GetSpratPuppetPartIndex(puppet, "tail"), -1);
+    CHECK_INT(GetSpratPuppetPoseIndex(puppet, "wave"), 0);
+    CHECK_INT(GetSpratPuppetPoseIndex(puppet, "nod"), -1);
+    CHECK_INT(GetSpratPuppetSequenceIndex(puppet, "go"), 0);
+    CHECK_INT(GetSpratPuppetSequenceIndex(puppet, "stop"), -1);
+    CHECK_FLOAT(GetSpratPuppetSequenceDuration(puppet, 0), 0.6);
+    CHECK_FLOAT(GetSpratPuppetSequenceDuration(puppet, 1), 0);
+    CHECK(!IsSpratPuppetSequenceFinished(puppet, 0, 100.0f));    // it loops
+    UnloadSpratPuppet(puppet);
+
+    // Not found, and a sheet without puppets: zeroed puppets that do nothing
+    SpratPuppet missing = LoadSpratPuppet(sheet, "r");
+    CHECK(!IsSpratPuppetValid(missing));
+    CHECK_INT(GetSpratPuppetPartSprite(missing, 0).frame, -1);
+    ApplySpratPuppetPose(missing, 0);
+    DrawSpratPuppet(missing, WHITE);
+    UnloadSpratPuppet(missing);
+    UnloadSpratSheet(sheet);
+
+    sheet = convert_text("sprat-raw 1\nsheet 1 0 0 0 1 0 0 0 0 0 0 0: 0:\natlas 4 4 0: 0: 0:\n");
+    CHECK(sheet.puppetData == NULL);
+    CHECK(!IsSpratPuppetValid(LoadSpratPuppet(sheet, "p")));
+    UnloadSpratSheet(sheet);
+}
+
+static void test_puppet_parts(void)
+{
+    SpratSheet sheet = convert_puppets(puppetSheet);
+    SpratPuppet puppet = LoadSpratPuppet(sheet, "p");
+    if (!IsSpratPuppetValid(puppet)) { failures++; return; }
+
+    puppet.position = (Vector2){ 100, 50 };
+    ApplySpratPuppetPose(puppet, 0);
+
+    // The body's pivot at its position, stretched 2 wide, reddened and half faded
+    SpratSprite body = GetSpratPuppetPartSprite(puppet, BODY);
+    CHECK_INT(body.frame, 0);
+    CHECK_FLOAT(body.position.x, 130);
+    CHECK_FLOAT(body.position.y, 70);
+    CHECK_FLOAT(body.scale.x, 2);
+    CHECK_FLOAT(body.scale.y, 1);
+    CHECK_FLOAT(body.rotation, 0);
+    Color tint = GetSpratPuppetPartTint(puppet, BODY, WHITE);
+    CHECK_INT(tint.r, 255);
+    CHECK_INT(tint.g, 0);
+    CHECK_INT(tint.a, 128);
+
+    // The arm's base on the stretched body's hand, at (38, 16): its pivot (0, 0) is 1 above
+    // the base, which the quarter turn puts 1 right
+    SpratSprite arm = GetSpratPuppetPartSprite(puppet, ARM);
+    CHECK_INT(arm.frame, 2);
+    CHECK_FLOAT(arm.position.x, 139);
+    CHECK_FLOAT(arm.position.y, 66);
+    CHECK_FLOAT(arm.rotation, 90);
+    CHECK_FLOAT(arm.scale.x, 1);
+    // A point placed on the sprite lands where sprat-lib placed it: the arm's tip
+    Vector2 tip = GetSpratSpritePoint(arm, (Vector2){ 4, 1 });
+    CHECK_FLOAT(tip.x, 138);
+    CHECK_FLOAT(tip.y, 70);
+
+    // The head shows its back, mirrored: blink's first frame, then its second at 8 fps,
+    // on the neck moved 2 body pixels right, which the stretch makes 4
+    SpratSprite head = GetSpratPuppetPartSprite(puppet, HEAD);
+    CHECK_INT(head.frame, 1);
+    CHECK_FLOAT(head.position.x, 134);
+    CHECK_FLOAT(head.position.y, 62);
+    CHECK_FLOAT(head.scale.x, -1);
+    UpdateSpratPuppet(&puppet, 0.125f);
+    UpdateSpratPuppet(&puppet, NAN);        // ignored
+    CHECK_INT(GetSpratPuppetPartSprite(puppet, HEAD).frame, 3);
+
+    // Mirrored, the puppet reverses every turn
+    puppet.time = 0.0f;
+    puppet.flip = SPRAT_FLIP_HORIZONTAL;
+    body = GetSpratPuppetPartSprite(puppet, BODY);
+    CHECK_FLOAT(body.position.x, 70);
+    CHECK_FLOAT(body.scale.x, -2);
+    arm = GetSpratPuppetPartSprite(puppet, ARM);
+    CHECK_FLOAT(arm.position.x, 61);
+    CHECK_FLOAT(arm.position.y, 66);
+    CHECK_FLOAT(arm.rotation, -90);
+    tip = GetSpratSpritePoint(arm, (Vector2){ 4, 1 });
+    CHECK_FLOAT(tip.x, 62);
+    CHECK_FLOAT(tip.y, 70);
+
+    // Scaled 2 and turned a quarter: (30, 20) goes to (60, 40), then to (-40, 60)
+    puppet.flip = 0;
+    puppet.scale = 2.0f;
+    puppet.rotation = 90.0f;
+    body = GetSpratPuppetPartSprite(puppet, BODY);
+    CHECK_FLOAT(body.position.x, 60);
+    CHECK_FLOAT(body.position.y, 110);
+    CHECK_FLOAT(body.rotation, 90);
+    CHECK_FLOAT(body.scale.x, 4);
+    CHECK_FLOAT(body.scale.y, 2);
+
+    // A sequence over the rest pose: one frame in, the arm is halfway up
+    puppet.scale = 1.0f;
+    puppet.rotation = 0.0f;
+    ResetSpratPuppetPose(puppet);
+    CHECK_FLOAT(GetSpratPuppetPartSprite(puppet, ARM).rotation, 0);
+    ApplySpratPuppetSequence(puppet, 0, 0.1f);
+    CHECK_FLOAT(GetSpratPuppetPartSprite(puppet, ARM).rotation, 45);
+    ApplySpratPuppetSequence(puppet, 5, 0.1f);     // out of range: nothing changes
+    CHECK_FLOAT(GetSpratPuppetPartSprite(puppet, ARM).rotation, 45);
+    CHECK_INT(GetSpratPuppetPartSprite(puppet, 3).frame, -1);
+    UnloadSpratPuppet(puppet);
+
+    // A part hanging by a marker its frame lacks isn't drawn, nor is what hangs from it
+    puppet = LoadSpratPuppet(sheet, "q");
+    CHECK_INT(GetSpratPuppetPartSprite(puppet, 0).frame, 0);
+    CHECK_INT(GetSpratPuppetPartSprite(puppet, 1).frame, -1);
+    CHECK_INT(GetSpratPuppetPartSprite(puppet, 2).frame, -1);
+    UnloadSpratPuppet(puppet);
+    UnloadSpratSheet(sheet);
+}
+
 int main(void)
 {
     SetTraceLogLevel(LOG_NONE);
@@ -1813,6 +2003,8 @@ int main(void)
     test_marker_center();
     test_marker_outline();
     test_npatch_matches_original();
+    test_puppet_lookups();
+    test_puppet_parts();
 
     if (failures != 0) fprintf(stderr, "%d failures\n", failures);
     else printf("all tests passed\n");

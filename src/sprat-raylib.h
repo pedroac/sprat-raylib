@@ -1,6 +1,6 @@
 /**********************************************************************************************
 *
-*   sprat-raylib v0.5.0 - Load and draw sprat-cli sprite sheets with raylib
+*   sprat-raylib v0.8.0 - Load and draw sprat-cli sprite sheets with raylib
 *
 *   DESCRIPTION:
 *       Loads the metadata written by `spratconvert --transform raw` (through sprat-lib)
@@ -30,6 +30,16 @@
 *           if (CheckCollisionSpratMarkers(hero, hitbox, coin, coinHitbox)) ...
 *           DrawSpratSprite(hero, WHITE);
 *
+*       A SpratPuppet is a cutout rig of parts joined by markers, played and drawn as
+*       sprat-gui previews it: reset its pose every update, apply sequences and poses, draw.
+*
+*           SpratPuppet kid = LoadSpratPuppet(sheet, "kid");
+*           ...
+*           UpdateSpratPuppet(&kid, GetFrameTime());
+*           ResetSpratPuppetPose(kid);
+*           ApplySpratPuppetSequence(kid, walk, walkTime);
+*           DrawSpratPuppet(kid, WHITE);
+*
 *       Frames keep the order of the sprites in the sheet, and animations the order of
 *       the sheet's animations, so indexes from sprat_sheet_bind() work as they are.
 *
@@ -42,7 +52,7 @@
 *
 *   DEPENDENCIES:
 *       raylib 5.5 or newer     - Textures, drawing, file loading and logging
-*       sprat-lib 0.14 or newer - Parsing and validating the .sprat file (implementation only)
+*       sprat-lib 0.15 or newer - Parsing the .sprat file and playing puppets (implementation only)
 *
 *   COORDINATES:
 *       Frame geometry (pivot, content, size, slice, markers) is in original-image pixels,
@@ -60,7 +70,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.7.0"
+#define SPRAT_RAYLIB_VERSION    "0.8.0"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)
@@ -168,6 +178,8 @@ typedef struct SpratSheet {
     int animationCount;         // Number of animations
     SpratAnimation *animations; // Animations, in sheet order
     float scale;                // Scale the art was packed at: draw at 1.0f/scale for its original size
+    int puppetCount;            // Number of puppets (cutout rigs)
+    void *puppetData;           // Puppets as sprat-lib loaded them (internal, NULL without puppets)
 } SpratSheet;
 
 // Frame placed on the screen: scaled, then flipped, then rotated clockwise around its pivot
@@ -181,6 +193,23 @@ typedef struct SpratSprite {
     float rotation;             // Clockwise rotation around the pivot, in degrees
     int flip;                   // Flip flags around the pivot (SpratFlip)
 } SpratSprite;
+
+// Cutout puppet placed on the screen: parts joined by markers, posed by poses and sequences
+// NOTE: Load one per puppet on screen. Every update, reset its pose, then apply sequences and
+// poses over it (later ones win where they set the same part); its parts' animations play on time.
+// A plain struct like SpratSprite: change position, scale, rotation and flip directly
+typedef struct SpratPuppet {
+    SpratSheet sheet;           // Sheet the puppet belongs to (shared, not owned: unload the sheet once)
+    int index;                  // Puppet index in the sheet
+    const char *name;           // Puppet name
+    int partCount;              // Number of parts, in draw order (the first at the back)
+    Vector2 position;           // Screen position of the puppet's pivot
+    float scale;                // Scale around the pivot (1.0f draws atlas pixels one to one)
+    float rotation;             // Clockwise rotation around the pivot, in degrees
+    int flip;                   // Flip flags around the pivot (SpratFlip)
+    float time;                 // Seconds its parts' animations have played: see UpdateSpratPuppet()
+    void *pose;                 // Pose of each part (internal)
+} SpratPuppet;
 
 #if defined(__cplusplus)
 extern "C" {            // Prevents name mangling of functions
@@ -237,6 +266,23 @@ SPRATAPI void UpdateSpratSpriteAnimation(SpratSprite *sprite, SpratAnimationPlay
 SPRATAPI void DrawSpratAnimation(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Color tint); // Draw the frame shown now, with the animation's flip
 SPRATAPI void DrawSpratAnimationEx(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, float rotation, float scale, Color tint); // Draw the frame shown now, with the animation's flip, rotation and scale around its pivot
 SPRATAPI void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip, Color tint); // Draw the frame shown now, scaled, flipped (flip combined with the animation's) and rotated around its pivot
+
+// Puppet functions
+SPRATAPI SpratPuppet LoadSpratPuppet(SpratSheet sheet, const char *name);      // Load a puppet by name, in its rest pose, with its pivot at (0, 0); zeroed if not found
+SPRATAPI bool IsSpratPuppetValid(SpratPuppet puppet);                          // Check if a puppet is valid (loaded from a sheet)
+SPRATAPI void UnloadSpratPuppet(SpratPuppet puppet);                           // Unload a puppet's pose (not its sheet)
+SPRATAPI int GetSpratPuppetPartIndex(SpratPuppet puppet, const char *name);    // Get part index by name, -1 if not found
+SPRATAPI int GetSpratPuppetPoseIndex(SpratPuppet puppet, const char *name);    // Get pose index by name, -1 if not found
+SPRATAPI int GetSpratPuppetSequenceIndex(SpratPuppet puppet, const char *name); // Get sequence index by name, -1 if not found
+SPRATAPI void ResetSpratPuppetPose(SpratPuppet puppet);                        // Reset to the rest pose: first variants, no turns or offsets, positioned parts in place
+SPRATAPI void ApplySpratPuppetPose(SpratPuppet puppet, int pose);              // Apply a pose: set what it sets, over the current pose
+SPRATAPI void ApplySpratPuppetSequence(SpratPuppet puppet, int sequence, float time); // Apply a sequence as it is time seconds after it started, over the pose it started from
+SPRATAPI float GetSpratPuppetSequenceDuration(SpratPuppet puppet, int sequence); // Get seconds one pass of a sequence takes
+SPRATAPI bool IsSpratPuppetSequenceFinished(SpratPuppet puppet, int sequence, float time); // Check if a sequence that plays once has ended time seconds after it started
+SPRATAPI void UpdateSpratPuppet(SpratPuppet *puppet, float deltaTime);         // Advance the animations its parts show by deltaTime seconds
+SPRATAPI SpratSprite GetSpratPuppetPartSprite(SpratPuppet puppet, int part);   // Get a part placed on the screen, as drawn (frame -1 when it isn't drawn)
+SPRATAPI Color GetSpratPuppetPartTint(SpratPuppet puppet, int part, Color tint); // Get tint combined with a part's tint and opacity, as drawn
+SPRATAPI void DrawSpratPuppet(SpratPuppet puppet, Color tint);                 // Draw a puppet's parts in order, each tinted and faded by its pose
 
 #if defined(__cplusplus)
 }
@@ -308,6 +354,15 @@ typedef struct SpratShape {
     SpratPlacement placement;
 } SpratShape;
 
+// Pose of a puppet's parts, and where they were last placed (one allocation)
+typedef struct SpratPuppetPose {
+    const sprat_puppet *rig;    // Rig the arrays below were sized for (the public fields only describe it)
+    sprat_part_state *states;   // What each part shows and how, after poses
+    sprat_part_frame *frames;   // Sprite each part shows at the puppet's time
+    sprat_part_place *places;   // Where each part goes, in the puppet's space
+    int *frameIndexes;          // Frame each part shows (an index into sheet.frames), -1 if none
+} SpratPuppetPose;
+
 // Where shapes are compared: the screen, or the unit space of an ellipse, where it is the unit disk
 // NOTE: A screen point p is at inverse*(p - origin)
 typedef struct SpratSpace {
@@ -320,10 +375,18 @@ typedef struct SpratSpace {
 //----------------------------------------------------------------------------------
 static SpratSheet SpratLoadSheetData(const unsigned char *fileData, int dataSize, const char *atlasDir, const char *fileName);
 static SpratSheet SpratConvertSheet(const sprat_sheet *raw);
+static size_t SpratAlign(size_t size);
+static bool SpratAddSize(size_t *total, size_t count, size_t itemSize, bool align);
+static void SpratGetCosSin(double angle, double *cosRes, double *sinRes);
+static bool SpratKeepPuppets(SpratSheet *sheet, sprat_sheet *raw);
+static const sprat_puppet *SpratGetRawPuppet(SpratPuppet puppet);
+static void SpratPlacePuppet(SpratPuppet puppet);
+static SpratSprite SpratGetPlacedPartSprite(SpratPuppet puppet, int part);
 static bool SpratJoinPath(char *buffer, int bufferSize, const char *dir, const char *path);
 static bool SpratIsFrameDrawable(SpratSheet sheet, int frame);
 static double SpratGetAnimationStepCount(SpratAnimation animation);
 static float SpratGetAnimationDuration(SpratAnimation animation);
+static int SpratGetAnimationStepFrame(const SpratAnimation *anim, double step);
 static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlayer player, Vector2 position, Vector2 scale, float rotation, int flip);
 static SpratPlacement SpratGetPlacement(Vector2 pivot, Vector2 position, Vector2 scale, float rotation, int flip);
 static SpratPoint SpratPlacePoint(const SpratPlacement *placement, double x, double y);
@@ -406,8 +469,9 @@ void UnloadSpratSheet(SpratSheet sheet)
         if (sheet.atlases[i].id > 0) UnloadTexture(sheet.atlases[i]);
     }
 
-    // Every array of the sheet lives in one allocation, starting at frames
+    // Every array of the sheet lives in one allocation, starting at frames; puppets stay in sprat-lib's
     RL_FREE(sheet.frames);
+    sprat_sheet_free((sprat_sheet *)sheet.puppetData);
 
     if (sheet.frames != NULL) TraceLog(LOG_INFO, "SPRAT: Unloaded sheet data from RAM and VRAM");
 }
@@ -884,27 +948,10 @@ bool IsSpratAnimationFinished(SpratAnimationPlayer player)
 // steps past the last frame walk the frames back
 int GetSpratAnimationFrame(SpratAnimationPlayer player)
 {
-    const SpratAnimation *anim = &player.animation;
-    double stepCount = SpratGetAnimationStepCount(*anim);
-
-    if ((stepCount <= 0.0) || (anim->frames == NULL)) return -1;
-
-    double position = (double)player.time*anim->fps;
+    double position = (double)player.time*player.animation.fps;
     double step = (player.speed < 0.0f)? ceil(position) - 1.0 : floor(position);
-    if (!isfinite(step)) return -1;     // NaN or infinite time: (int)step would be undefined
 
-    if (!(anim->loop & SPRAT_LOOP_MODE_ONCE))
-    {
-        // fmod() keeps the step exact and in range for any time, negative included
-        step = fmod(step, stepCount);
-        if (step < 0.0) step += stepCount;
-    }
-    else if (step < 0.0) step = 0.0;
-    else if (step > stepCount - 1.0) step = stepCount - 1.0;
-
-    if (step >= anim->frameCount) step = 2.0*(anim->frameCount - 1) - step;    // On the way back
-
-    return anim->frames[(int)step];
+    return SpratGetAnimationStepFrame(&player.animation, step);
 }
 
 // Set a sprite's frame to the one shown now, and its flip to the animation's
@@ -947,6 +994,226 @@ void DrawSpratAnimationPro(SpratSheet sheet, SpratAnimationPlayer player, Vector
     DrawSpratSprite(SpratMakeAnimationSprite(sheet, player, position, scale, rotation, flip), tint);
 }
 
+// Load a puppet by name, in its rest pose, with its pivot at (0, 0); zeroed if not found
+SpratPuppet LoadSpratPuppet(SpratSheet sheet, const char *name)
+{
+    SpratPuppet puppet = { 0 };
+    const sprat_sheet *raw = (const sprat_sheet *)sheet.puppetData;
+
+    if ((raw == NULL) || (name == NULL))
+    {
+        TraceLog(LOG_WARNING, "SPRAT: Failed to load puppet %s: the sheet has no puppets", (name != NULL)? name : "(null)");
+        return puppet;
+    }
+
+    for (int i = 0; (size_t)i < raw->puppet_count; i++)
+    {
+        const sprat_puppet *p = &raw->puppets[i];
+        if (strcmp(p->name, name) != 0) continue;
+
+        // One allocation for every part's state, frame, place and frame index
+        size_t count = (p->part_count > 0)? p->part_count : 1;
+        size_t size = 0;
+        if ((p->part_count > INT_MAX) ||
+            !SpratAddSize(&size, 1, sizeof(SpratPuppetPose), true) ||
+            !SpratAddSize(&size, count, sizeof(sprat_part_state), true) ||
+            !SpratAddSize(&size, count, sizeof(sprat_part_frame), true) ||
+            !SpratAddSize(&size, count, sizeof(sprat_part_place), true) ||
+            !SpratAddSize(&size, count, sizeof(int), true))
+        {
+            TraceLog(LOG_WARNING, "SPRAT: Failed to load puppet %s: too many parts", name);
+            return puppet;
+        }
+
+        unsigned char *block = (unsigned char *)RL_CALLOC(size, 1);
+        if (block == NULL)
+        {
+            TraceLog(LOG_WARNING, "SPRAT: Failed to load puppet %s: out of memory", name);
+            return puppet;
+        }
+
+        SpratPuppetPose *pose = (SpratPuppetPose *)(void *)block;
+        size_t offset = SpratAlign(sizeof(SpratPuppetPose));
+        pose->states = (sprat_part_state *)(void *)(block + offset);
+        offset += SpratAlign(count*sizeof(sprat_part_state));
+        pose->frames = (sprat_part_frame *)(void *)(block + offset);
+        offset += SpratAlign(count*sizeof(sprat_part_frame));
+        pose->places = (sprat_part_place *)(void *)(block + offset);
+        offset += SpratAlign(count*sizeof(sprat_part_place));
+        pose->frameIndexes = (int *)(void *)(block + offset);
+        pose->rig = p;
+
+        puppet.sheet = sheet;
+        puppet.index = i;
+        puppet.name = p->name;
+        puppet.partCount = (int)p->part_count;
+        puppet.scale = 1.0f;
+        puppet.pose = pose;
+        sprat_puppet_rest(p, pose->states);
+
+        return puppet;
+    }
+
+    TraceLog(LOG_WARNING, "SPRAT: Failed to find puppet: %s", name);
+    return puppet;
+}
+
+// Check if a puppet is valid (loaded from a sheet)
+bool IsSpratPuppetValid(SpratPuppet puppet)
+{
+    return (SpratGetRawPuppet(puppet) != NULL);
+}
+
+// Unload a puppet's pose (not its sheet)
+void UnloadSpratPuppet(SpratPuppet puppet)
+{
+    RL_FREE(puppet.pose);
+}
+
+// Get part index by name, -1 if not found
+int GetSpratPuppetPartIndex(SpratPuppet puppet, const char *name)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (name == NULL)) return -1;
+
+    for (size_t i = 0; i < p->part_count; i++)
+    {
+        if (strcmp(p->parts[i].name, name) == 0) return (int)i;
+    }
+
+    TraceLog(LOG_WARNING, "SPRAT: Failed to find part %s of puppet %s", name, p->name);
+    return -1;
+}
+
+// Get pose index by name, -1 if not found
+int GetSpratPuppetPoseIndex(SpratPuppet puppet, const char *name)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (name == NULL)) return -1;
+
+    for (size_t i = 0; (i < p->pose_count) && (i < INT_MAX); i++)
+    {
+        if (strcmp(p->poses[i].name, name) == 0) return (int)i;
+    }
+
+    TraceLog(LOG_WARNING, "SPRAT: Failed to find pose %s of puppet %s", name, p->name);
+    return -1;
+}
+
+// Get sequence index by name, -1 if not found
+int GetSpratPuppetSequenceIndex(SpratPuppet puppet, const char *name)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (name == NULL)) return -1;
+
+    for (size_t i = 0; (i < p->sequence_count) && (i < INT_MAX); i++)
+    {
+        if (strcmp(p->sequences[i].name, name) == 0) return (int)i;
+    }
+
+    TraceLog(LOG_WARNING, "SPRAT: Failed to find sequence %s of puppet %s", name, p->name);
+    return -1;
+}
+
+// Reset to the rest pose: first variants, no turns or offsets, positioned parts in place
+void ResetSpratPuppetPose(SpratPuppet puppet)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if (p != NULL) sprat_puppet_rest(p, ((SpratPuppetPose *)puppet.pose)->states);
+}
+
+// Apply a pose: set what it sets, over the current pose
+void ApplySpratPuppetPose(SpratPuppet puppet, int pose)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p != NULL) && (pose >= 0)) sprat_puppet_apply_pose(p, (size_t)pose, ((SpratPuppetPose *)puppet.pose)->states);
+}
+
+// Apply a sequence as it is time seconds after it started, over the pose it started from
+// NOTE: Reset the pose and apply sequences every update, so each starts from the same pose.
+// Each step tweens (or snaps) to its pose; looping passes start where the last one ended,
+// ping-pong plays the pass back in time, and once holds the end
+void ApplySpratPuppetSequence(SpratPuppet puppet, int sequence, float time)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p != NULL) && (sequence >= 0)) sprat_puppet_apply_sequence(p, (size_t)sequence, (double)time, ((SpratPuppetPose *)puppet.pose)->states);
+}
+
+// Get seconds one pass of a sequence takes
+float GetSpratPuppetSequenceDuration(SpratPuppet puppet, int sequence)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (sequence < 0) || ((size_t)sequence >= p->sequence_count)) return 0.0f;
+
+    return (float)sprat_sequence_duration(&p->sequences[sequence]);
+}
+
+// Check if a sequence that plays once has ended time seconds after it started
+// NOTE: Looping sequences never finish
+bool IsSpratPuppetSequenceFinished(SpratPuppet puppet, int sequence, float time)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (sequence < 0) || ((size_t)sequence >= p->sequence_count)) return false;
+
+    return sprat_sequence_is_finished(&p->sequences[sequence], (double)time);
+}
+
+// Advance the animations its parts show by deltaTime seconds
+// NOTE: Each animation plays from the puppet's time at its own fps and loop mode
+void UpdateSpratPuppet(SpratPuppet *puppet, float deltaTime)
+{
+    if ((puppet == NULL) || !isfinite(deltaTime)) return;
+
+    puppet->time += deltaTime;
+}
+
+// Get a part placed on the screen, as drawn (frame -1 when it isn't drawn)
+// NOTE: A part isn't drawn when it shows nothing, or hangs by a marker its frame lacks (a missing
+// "pivot" marker is the frame's pivot), or hangs from a part that isn't drawn: as sprat-gui previews it
+// NOTE: Places every part, since a part follows its parents: to draw them all, use DrawSpratPuppet()
+SpratSprite GetSpratPuppetPartSprite(SpratPuppet puppet, int part)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (part < 0) || ((size_t)part >= p->part_count)) return MakeSpratSprite(puppet.sheet, -1, puppet.position);
+
+    SpratPlacePuppet(puppet);
+
+    return SpratGetPlacedPartSprite(puppet, part);
+}
+
+// Get tint combined with a part's tint and opacity, as drawn
+Color GetSpratPuppetPartTint(SpratPuppet puppet, int part, Color tint)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if ((p == NULL) || (part < 0) || ((size_t)part >= p->part_count)) return tint;
+
+    const sprat_part_state *state = &((SpratPuppetPose *)puppet.pose)->states[part];
+    float channels[4] = { state->tint_r, state->tint_g, state->tint_b, state->opacity };
+    unsigned char *color[4] = { &tint.r, &tint.g, &tint.b, &tint.a };
+
+    for (int i = 0; i < 4; i++)
+    {
+        float value = (float)*color[i]*channels[i];     // States hold 0..1, so this stays in 0..255
+        *color[i] = (unsigned char)(value + 0.5f);
+    }
+
+    return tint;
+}
+
+// Draw a puppet's parts in order, each tinted and faded by its pose
+void DrawSpratPuppet(SpratPuppet puppet, Color tint)
+{
+    const sprat_puppet *p = SpratGetRawPuppet(puppet);
+    if (p == NULL) return;
+
+    SpratPlacePuppet(puppet);
+
+    for (int i = 0; i < (int)p->part_count; i++)
+    {
+        DrawSpratSprite(SpratGetPlacedPartSprite(puppet, i), GetSpratPuppetPartTint(puppet, i, tint));
+    }
+}
+
 //----------------------------------------------------------------------------------
 // Module Internal Functions Definition
 //----------------------------------------------------------------------------------
@@ -979,10 +1246,10 @@ static SpratSheet SpratLoadSheetData(const unsigned char *fileData, int dataSize
             else TraceLog(LOG_WARNING, "SPRAT: [%s] Failed to load atlas %i: path too long", fileName, i);
         }
 
-        TraceLog(LOG_INFO, "SPRAT: [%s] Sheet loaded successfully (%i atlases, %i frames, %i animations)", fileName, sheet.atlasCount, sheet.frameCount, sheet.animationCount);
+        TraceLog(LOG_INFO, "SPRAT: [%s] Sheet loaded successfully (%i atlases, %i frames, %i animations, %i puppets)", fileName, sheet.atlasCount, sheet.frameCount, sheet.animationCount, sheet.puppetCount);
     }
 
-    sprat_sheet_free(raw);
+    if ((sheet.frames == NULL) || !SpratKeepPuppets(&sheet, raw)) sprat_sheet_free(raw);
 
     return sheet;
 }
@@ -1239,6 +1506,29 @@ static double SpratGetAnimationStepCount(SpratAnimation animation)
     return count;
 }
 
+// Get frame index shown at a step of an animation with frames (an index into sheet.frames), -1 if none
+// NOTE: Repeating animations start over; the others hold their end. With ping-pong, steps past the
+// last frame walk the frames back
+static int SpratGetAnimationStepFrame(const SpratAnimation *anim, double step)
+{
+    double stepCount = SpratGetAnimationStepCount(*anim);
+
+    if (!isfinite(step) || (stepCount <= 0.0) || (anim->frames == NULL)) return -1;     // (int)step would be undefined
+
+    if (!(anim->loop & SPRAT_LOOP_MODE_ONCE))
+    {
+        // fmod() keeps the step exact and in range for any time, negative included
+        step = fmod(step, stepCount);
+        if (step < 0.0) step += stepCount;
+    }
+    else if (step < 0.0) step = 0.0;
+    else if (step > stepCount - 1.0) step = stepCount - 1.0;
+
+    if (step >= anim->frameCount) step = 2.0*(anim->frameCount - 1) - step;    // On the way back
+
+    return anim->frames[(int)step];
+}
+
 // Get the duration of one pass of an animation in seconds, 0 for one without frames
 static float SpratGetAnimationDuration(SpratAnimation animation)
 {
@@ -1258,6 +1548,105 @@ static SpratSprite SpratMakeAnimationSprite(SpratSheet sheet, SpratAnimationPlay
     sprite.scale = scale;
     sprite.rotation = rotation;
     sprite.flip ^= flip;
+
+    return sprite;
+}
+
+// Keep sprat-lib's sheet for its puppets, which sprat-lib plays; false when there are none to keep
+static bool SpratKeepPuppets(SpratSheet *sheet, sprat_sheet *raw)
+{
+    if (raw->puppet_count == 0) return false;
+
+    if (raw->puppet_count > INT_MAX)
+    {
+        TraceLog(LOG_WARNING, "SPRAT: Failed to load puppets: too many");
+        return false;
+    }
+
+    sheet->puppetCount = (int)raw->puppet_count;
+    sheet->puppetData = raw;
+
+    return true;
+}
+
+// Get a puppet's rig in sprat-lib, NULL if the puppet is not loaded
+// NOTE: Taken from the pose, which was sized for it, never from fields a program may have changed
+static const sprat_puppet *SpratGetRawPuppet(SpratPuppet puppet)
+{
+    return (puppet.pose != NULL)? ((const SpratPuppetPose *)puppet.pose)->rig : NULL;
+}
+
+// Place every part of a loaded puppet in its space: what each shows at the puppet's time, then where
+static void SpratPlacePuppet(SpratPuppet puppet)
+{
+    const sprat_sheet *raw = (const sprat_sheet *)puppet.sheet.puppetData;
+    SpratPuppetPose *pose = (SpratPuppetPose *)puppet.pose;
+    const sprat_puppet *p = pose->rig;
+    int partCount = (int)p->part_count;
+
+    for (int i = 0; i < partCount; i++)
+    {
+        const sprat_part *part = &p->parts[i];
+        const sprat_part_state *state = &pose->states[i];
+        int frame = -1;
+        unsigned flip = 0;
+
+        if (state->variant < part->variant_count)
+        {
+            const sprat_variant *variant = &part->variants[state->variant];
+
+            if (variant->kind == SPRAT_VARIANT_SPRITE) frame = (int)variant->index;
+            else
+            {
+                // Animations play on the puppet's clock, each at its own fps and loop mode, stepping
+                // as sprat-gui's preview does: a time on a step's start shows that step
+                const SpratAnimation *anim = &puppet.sheet.animations[variant->index];
+
+                frame = SpratGetAnimationStepFrame(anim, floor((double)puppet.time*anim->fps + 1e-9));
+                flip = (unsigned)anim->flip;
+            }
+        }
+
+        pose->frameIndexes[i] = frame;
+        pose->frames[i].sprite = (frame >= 0)? &raw->sprites[frame] : NULL;
+        pose->frames[i].flip = flip;
+    }
+
+    sprat_puppet_place(p, pose->states, pose->frames, pose->places);
+
+    // Parts that can't be placed (a missing marker, or hanging from such a part) aren't drawn
+    for (int i = 0; i < partCount; i++)
+    {
+        if (!pose->places[i].placed) pose->frameIndexes[i] = -1;
+    }
+}
+
+// Get a placed part as a sprite on the screen: its frame's pivot where the part's transform and the
+// puppet's put it, with the same scale and rotation
+// NOTE: sprat-lib places parts by any anchor, and a sprite by its pivot; with no skew, the same
+// transform maps both. The puppet's flip mirrors the part's turn, since a mirror reverses turns
+static SpratSprite SpratGetPlacedPartSprite(SpratPuppet puppet, int part)
+{
+    const SpratPuppetPose *pose = (const SpratPuppetPose *)puppet.pose;
+    int frame = pose->frameIndexes[part];
+    SpratSprite sprite = MakeSpratSprite(puppet.sheet, frame, puppet.position);
+
+    if (frame < 0) return sprite;
+
+    const sprat_part_place *place = &pose->places[part];
+    sprat_vec2 pivot = { puppet.sheet.frames[frame].pivot.x, puppet.sheet.frames[frame].pivot.y };
+    sprat_vec2 at = sprat_part_place_point(place, pivot);
+    double flipX = (puppet.flip & SPRAT_FLIP_HORIZONTAL)? -1.0 : 1.0;
+    double flipY = (puppet.flip & SPRAT_FLIP_VERTICAL)? -1.0 : 1.0;
+    double x = flipX*at.x*puppet.scale;
+    double y = flipY*at.y*puppet.scale;
+    double cosRes = 1.0, sinRes = 0.0;
+
+    SpratGetCosSin(puppet.rotation, &cosRes, &sinRes);
+
+    sprite.position = (Vector2){ (float)(puppet.position.x + cosRes*x - sinRes*y), (float)(puppet.position.y + sinRes*x + cosRes*y) };
+    sprite.rotation = puppet.rotation + ((flipX*flipY < 0.0)? -place->rotation : place->rotation);
+    sprite.scale = (Vector2){ (float)(flipX*puppet.scale*place->scale_x), (float)(flipY*puppet.scale*place->scale_y) };
 
     return sprite;
 }
