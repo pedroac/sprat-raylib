@@ -1,7 +1,8 @@
-/* Tests sprat-raylib without a window: converting sheets, the queries, and the
- * geometry of every draw. Draws are checked by rasterizing the DrawTexturePro()
- * arguments the library computes, the way raylib maps its quad, and comparing
- * every screen pixel with the original image placed at its pivot. */
+/* Tests sprat-raylib without a window: converting sheets, the queries, the
+ * geometry of every draw, and the puppet player. Draws are checked by
+ * rasterizing the DrawTexturePro() arguments the library computes, the way
+ * raylib maps its quad, and comparing every screen pixel with the original
+ * image placed at its pivot. */
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -344,6 +345,36 @@ static void test_lookups(void)
     CHECK(!IsSpratSheetValid(empty));
     CHECK_INT(GetSpratFrameIndex(empty, "a"), -1);
     UnloadSpratSheet(empty);   // a no-op
+}
+
+/* A frame is drawable only with an in-range atlas whose texture is valid. */
+static void test_frame_drawable(void)
+{
+    SpratFrame frame = { 0 };
+    Texture2D texture = { 0 };
+    SpratSheet sheet = { 0 };
+
+    sheet.frames = &frame;
+    sheet.frameCount = 1;
+    sheet.atlases = &texture;
+    sheet.atlasCount = 1;
+
+    CHECK(!SpratIsFrameDrawable(sheet, -1));
+    CHECK(!SpratIsFrameDrawable(sheet, 1));
+    CHECK(!SpratIsFrameDrawable(sheet, 0));      // texture id 0
+
+    texture.id = 1;
+    CHECK(!SpratIsFrameDrawable(sheet, 0));      // no size, format or mipmaps
+    texture.width = 4;
+    texture.height = 4;
+    texture.format = 1;
+    texture.mipmaps = 1;
+    CHECK(SpratIsFrameDrawable(sheet, 0));
+
+    frame.atlas = 1;
+    CHECK(!SpratIsFrameDrawable(sheet, 0));      // atlas out of range
+    frame.atlas = -1;
+    CHECK(!SpratIsFrameDrawable(sheet, 0));
 }
 
 /* ---- Drawing -------------------------------------------------------------- */
@@ -1646,6 +1677,25 @@ static void test_marker_outline(void)
     }
     CHECK_INT(previous, 257);   // the largest, of a radius of 5000 pixels, is capped
 
+    // A circle flattened by a zero scale is its segment; a zero radius is its point
+    SpratMarker flat = circle_marker(3, 4, 5);
+    sprite = placed(3, 0, 0, 1, 0, 0);
+    count = GetSpratMarkerOutline(sprite, &flat, points, COUNT(points));
+    CHECK_INT(count, 3);
+    CHECK_FLOAT(points[0].x, 3);
+    CHECK_FLOAT(points[0].y, -1);
+    CHECK_FLOAT(points[1].x, 3);
+    CHECK_FLOAT(points[1].y, 9);
+    CHECK_FLOAT(points[2].x, 3);
+    CHECK_FLOAT(points[2].y, -1);
+
+    flat = circle_marker(3, 4, 0);
+    sprite = at(0, 0);
+    count = GetSpratMarkerOutline(sprite, &flat, points, COUNT(points));
+    CHECK_INT(count, 1);
+    CHECK_FLOAT(points[0].x, 3);
+    CHECK_FLOAT(points[0].y, 4);
+
     // Like snprintf(): the count, and only what fits written
     sprite = at(0, 0);
     CHECK_INT(GetSpratMarkerOutline(sprite, &rect, NULL, 0), 5);
@@ -1763,8 +1813,8 @@ static void test_npatch_matches_original(void)
     CHECK_INT(SpratGetNPatchDrawCalls(&frame, (Rectangle){ 0, 0, 0, 10 }, calls), 0);
 }
 
-/* Sheets from today's spratconvert (sprat-raw 10) carry puppets, which sprat-raylib
- * doesn't play yet: they still load, with their frames and animations. */
+/* Sheets from today's spratconvert (sprat-raw 10) carry puppets: their frames
+ * and animations still load, and the puppet tests below cover the rigs. */
 static void test_convert_current_format(void)
 {
     SpratSheet sheet = convert_text(
@@ -1991,6 +2041,7 @@ int main(void)
     test_add_size_overflow();
     test_join_path();
     test_lookups();
+    test_frame_drawable();
     test_animation_player();
     test_animation_pingpong();
     test_set_animation();

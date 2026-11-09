@@ -1,6 +1,6 @@
 /**********************************************************************************************
 *
-*   sprat-raylib v0.8.0 - Load and draw sprat-cli sprite sheets with raylib
+*   sprat-raylib v0.8.1 - Load and draw sprat-cli sprite sheets with raylib
 *
 *   DESCRIPTION:
 *       Loads the metadata written by `spratconvert --transform raw` (through sprat-lib)
@@ -70,7 +70,7 @@
 
 #include "raylib.h"
 
-#define SPRAT_RAYLIB_VERSION    "0.8.0"
+#define SPRAT_RAYLIB_VERSION    "0.8.1"
 
 // Function specifiers in case library is build/used as a shared library (Windows)
 #if defined(_WIN32) && defined(SPRAT_RAYLIB_BUILD_SHARED)
@@ -204,7 +204,7 @@ typedef struct SpratPuppet {
     const char *name;           // Puppet name
     int partCount;              // Number of parts, in draw order (the first at the back)
     Vector2 position;           // Screen position of the puppet's pivot
-    float scale;                // Scale around the pivot (1.0f draws atlas pixels one to one)
+    float scale;                // Uniform scale around the pivot (1.0f draws atlas pixels one to one)
     float rotation;             // Clockwise rotation around the pivot, in degrees
     int flip;                   // Flip flags around the pivot (SpratFlip)
     float time;                 // Seconds its parts' animations have played: see UpdateSpratPuppet()
@@ -688,13 +688,14 @@ static int SpratGetCircleSides(double radius)
 }
 
 // Get a placed shape's closed outline, returns its point count (filling only maxPoints)
-// NOTE: A circle is center + l*(cos, sin), with as many sides as its longest axis needs; a polygon,
-// a rectangle or a point is its vertices, closed by the first again unless it is a single point
+// NOTE: A circle is center + l*(cos, sin), with as many sides as its longest axis needs; a circle
+// flattened by a zero scale, a polygon, a rectangle or a point is its vertices, closed by the first
+// again unless it is a single point
 static int SpratGetShapeOutline(const SpratShape *shape, Vector2 *points, int maxPoints)
 {
     int count = 0;
 
-    if (shape->circle)
+    if (shape->circle && shape->ellipse)
     {
         const double *l = shape->l;
         int sides = SpratGetCircleSides(fmax(hypot(l[0], l[2]), hypot(l[1], l[3])));
@@ -728,7 +729,8 @@ static int SpratGetShapeOutline(const SpratShape *shape, Vector2 *points, int ma
 // NOTE: The outline ends on the point it starts from, so DrawLineStrip() draws the whole shape:
 // a rectangle's 4 corners from its top-left one, a polygon's vertices, or points around a circle
 // (as many as keep it within a quarter of a pixel of the curve, up to 256), each followed by the
-// first again. A point marker's outline, and a one-vertex polygon's, is that point.
+// first again. A point marker's outline, and a one-vertex polygon's, is that point; a circle
+// flattened to a segment or a point is that segment or point.
 // Like snprintf(), it returns the full count but fills only maxPoints: pass NULL and 0 to count.
 // Returns 0 for a NULL or invalid marker, or an out-of-range frame
 int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2 *points, int maxPoints)
@@ -741,14 +743,15 @@ int GetSpratMarkerOutline(SpratSprite sprite, const SpratMarker *marker, Vector2
 }
 
 // Draw a marker's outline (a cross for a point)
-// NOTE: Use it to see hitboxes; it turns, mirrors and stretches with the sprite
+// NOTE: Use it to see hitboxes; it turns, mirrors and stretches with the sprite. A circle
+// flattened by a zero scale is drawn as its segment, or as a cross when it is a point
 void DrawSpratMarker(SpratSprite sprite, const SpratMarker *marker, Color color)
 {
     SpratShape shape = { 0 };
 
     if (!SpratGetMarkerShape(sprite, marker, &shape)) return;
 
-    if (shape.circle)
+    if (shape.circle && shape.ellipse)
     {
         Vector2 points[SPRAT_MAX_CIRCLE_SIDES + 1];
         int count = SpratGetShapeOutline(&shape, points, SPRAT_MAX_CIRCLE_SIDES + 1);
@@ -1000,9 +1003,15 @@ SpratPuppet LoadSpratPuppet(SpratSheet sheet, const char *name)
     SpratPuppet puppet = { 0 };
     const sprat_sheet *raw = (const sprat_sheet *)sheet.puppetData;
 
-    if ((raw == NULL) || (name == NULL))
+    if (raw == NULL)
     {
         TraceLog(LOG_WARNING, "SPRAT: Failed to load puppet %s: the sheet has no puppets", (name != NULL)? name : "(null)");
+        return puppet;
+    }
+
+    if (name == NULL)
+    {
+        TraceLog(LOG_WARNING, "SPRAT: Failed to load puppet: no name");
         return puppet;
     }
 
@@ -1159,7 +1168,8 @@ bool IsSpratPuppetSequenceFinished(SpratPuppet puppet, int sequence, float time)
 }
 
 // Advance the animations its parts show by deltaTime seconds
-// NOTE: Each animation plays from the puppet's time at its own fps and loop mode
+// NOTE: Each animation plays from the puppet's time at its own fps and loop mode. The time grows
+// without bound: reset it after very long sessions to keep the float's frame precision
 void UpdateSpratPuppet(SpratPuppet *puppet, float deltaTime)
 {
     if ((puppet == NULL) || !isfinite(deltaTime)) return;
@@ -1490,7 +1500,7 @@ static bool SpratIsFrameDrawable(SpratSheet sheet, int frame)
 
     int atlas = sheet.frames[frame].atlas;
 
-    return (atlas >= 0) && (atlas < sheet.atlasCount) && (sheet.atlases[atlas].id > 0);
+    return (atlas >= 0) && (atlas < sheet.atlasCount) && IsTextureValid(sheet.atlases[atlas]);
 }
 
 // Get the number of frames shown in one pass of an animation, 0 for one without frames
