@@ -34,6 +34,8 @@ raylib types, loads the atlas textures, and does the drawing math.
   `SpratGetFrameDrawCall()` / `SpratGetNPatchDrawCalls()`, which compute the
   `DrawTexturePro()` arguments. The draw tests rasterize those arguments the way
   raylib maps its quad and compare every pixel with the original image.
+- `docs/guide.md`: the user documentation (build options, API, behavior). `README.md`
+  stays a short overview that links to it.
 - `examples/sprite_sheet.c`: the demo, in raylib's example layout.
   `examples/resources/` holds a sheet packed by sprat-cli (`make_resources.sh`)
   from frames drawn by `make_sources.py`.
